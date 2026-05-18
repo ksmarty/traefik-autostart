@@ -11,7 +11,7 @@ import docker
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
@@ -25,6 +25,7 @@ print(f"Docker socket path: {DOCKER_SOCKET}")
 
 containers_state: dict[str, dict] = {}
 last_request_time: dict[str, datetime] = {}
+starting_containers: set[str] = set()
 event_queue: asyncio.Queue = asyncio.Queue()
 
 client: Optional[docker.DockerClient] = None
@@ -52,58 +53,45 @@ class ContainerManager:
 
     def find_container_by_host(self, host: str) -> Optional[dict]:
         managed = self.find_managed_containers()
-        print(f"[DEBUG] find_container_by_host: looking for host={host}, managed_containers={[c['name'] for c in managed]}")
 
         # Primary: check traefik router rule labels directly on managed containers.
         for c in managed:
-            print(f"[DEBUG] Checking container: {c['name']}")
             for key, value in c["labels"].items():
                 if key.startswith("traefik.http.routers.") and key.endswith(".rule"):
-                    print(f"[DEBUG]   Found router rule label: {key} = {value}")
                     if f"Host(`{host}`)" in value:
-                        print(f"[DEBUG]   MATCH! Returning container: {c['name']}")
                         return c
 
-        # Fallback: query Traefik API
-        print(f"[DEBUG] No match in labels, querying Traefik API at {TRAEFIK_API_URL}")
+        # Fallback: query Traefik API for containers using defaultRule or other discovery.
+        # Docker provider service names are "{slug}@docker"; the slug matches the compose
+        # service name (com.docker.compose.service) or an explicit traefik service label.
+        # The router name slug (e.g. "pdf" from "pdf@docker") is checked first since Traefik
+        # names Docker routers after the container even when a custom service name is used.
         try:
             resp = httpx.get(f"{TRAEFIK_API_URL}/api/rawdata", timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
-            routers = data.get("routers", {})
-            print(f"[DEBUG] Traefik has {len(routers)} routers: {list(routers.keys())}")
-
-            for router_name, router_data in routers.items():
+            for router_name, router_data in data.get("routers", {}).items():
                 rule = router_data.get("rule", "")
-                print(f"[DEBUG]   Router {router_name}: rule={rule}")
                 if f"Host(`{host}`)" not in rule:
                     continue
 
                 service_name = router_data.get("service", "")
-                print(f"[DEBUG]   Router {router_name} matches, service={service_name}")
 
                 service_slug = service_name.rsplit("@", 1)[0] if "@" in service_name else service_name
                 router_slug = router_name.rsplit("@", 1)[0] if "@" in router_name else router_name
-                print(f"[DEBUG]   service_slug={service_slug}, router_slug={router_slug}")
 
                 for c in managed:
                     labels = c["labels"]
-                    # Match by service slug, router name slug, container name, or compose service name.
-                    # The router slug is the most reliable: Traefik names Docker routers after the
-                    # container/service (e.g. "pdf@docker" → slug "pdf" matches container "pdf")
-                    # even when a custom service name like "pdf-misc" is used.
                     if c["name"] in (service_slug, router_slug) or c["service_name"] in (service_slug, router_slug):
-                        print(f"[DEBUG]   Found container by name/slug: {c['name']}")
                         return c
                     if any(k.startswith(f"traefik.http.services.{service_slug}.") for k in labels):
-                        print(f"[DEBUG]   Found container by service label: {c['name']}")
                         return c
 
         except Exception as e:
-            print(f"[ERROR] Error querying Traefik API: {e}")
+            print(f"Error querying Traefik API: {e}")
 
-        print(f"[DEBUG] No container found for host={host}")
+        print(f"No container found for host={host}")
         return None
 
     def find_container_by_name(self, name: str) -> Optional[dict]:
@@ -186,6 +174,64 @@ class ContainerManager:
 
 
 manager = ContainerManager()
+
+
+async def wait_for_traefik_backend(host: str, timeout: int = 15) -> bool:
+    """Poll Traefik's rawdata API until the service for `host` has at least one UP server.
+
+    This bridges the gap between Docker reporting a container as running/healthy and
+    Traefik actually registering the new backend in its load balancer pool.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(f"{TRAEFIK_API_URL}/api/rawdata", timeout=5)
+            data = resp.json()
+            for router_data in data.get("routers", {}).values():
+                if f"Host(`{host}`)" not in router_data.get("rule", ""):
+                    continue
+                service_name = router_data.get("service", "")
+                services = data.get("services", {})
+                # Try both "name" and "name@docker" as Traefik may use either form
+                for key in (service_name, service_name + "@docker"):
+                    servers = services.get(key, {}).get("loadBalancer", {}).get("servers", [])
+                    if any(s.get("status") == "UP" for s in servers):
+                        return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+    return False
+
+
+async def start_container_task(name: str, group: str, host: str):
+    """Start a container in the background, then wait for Traefik to register the backend.
+
+    Keeps `name` in `starting_containers` until both conditions are true so that
+    concurrent /wake calls return 202 rather than 200 until the service is actually ready.
+    """
+    try:
+        success = await asyncio.to_thread(manager.start_container, name)
+        if success:
+            if group:
+                await asyncio.to_thread(start_group, group, name)
+            # Wait for Traefik to pick up the new backend before marking ready.
+            # Without this, the middleware forwards the request into an empty backend pool.
+            await wait_for_traefik_backend(host)
+            print(f"Container {name} ready for host {host}")
+            await event_queue.put({
+                "type": "wake",
+                "container": name,
+                "message": f"Container started for host: {host}",
+            })
+        else:
+            print(f"Failed to start container {name}")
+            await event_queue.put({
+                "type": "error",
+                "container": name,
+                "message": f"Failed to start container for host: {host}",
+            })
+    finally:
+        starting_containers.discard(name)
 
 
 async def check_inactivity():
@@ -312,35 +358,35 @@ async def wake(request: Request):
     group = labels.get("autostart.group", "")
 
     last_request_time[name] = datetime.now()
-
-    if container["status"] != "running":
-        # Run blocking start (which waits for health) in a thread pool to avoid
-        # blocking the asyncio event loop for the duration of the container startup.
-        success = await asyncio.to_thread(manager.start_container, name)
-        if group:
-            await asyncio.to_thread(start_group, group, name)
-        if success:
-            await event_queue.put({
-                "type": "wake",
-                "container": name,
-                "message": f"Container started for host: {host}",
-            })
-        else:
-            raise HTTPException(status_code=500, detail="Failed to start container")
-    else:
-        await event_queue.put({
-            "type": "request",
-            "container": name,
-            "message": f"Request forwarded for host: {host}",
-        })
-
     containers_state[name] = {
         "status": manager.get_container_status(name),
         "last_request": datetime.now().isoformat(),
         "labels": labels,
     }
 
-    return {"status": "ok", "container": name}
+    # Container is running and Traefik backend is ready — forward the request
+    if container["status"] == "running" and name not in starting_containers:
+        await event_queue.put({
+            "type": "request",
+            "container": name,
+            "message": f"Request forwarded for host: {host}",
+        })
+        return {"status": "ok", "container": name}
+
+    # Container needs to start — fire off a background task and return 202 immediately.
+    # The middleware treats any non-200 as "not ready" and shows the loading page.
+    # Subsequent /wake polls will return 202 until start_container_task completes and
+    # removes the name from starting_containers.
+    if name not in starting_containers:
+        starting_containers.add(name)
+        asyncio.create_task(start_container_task(name, group, host))
+        await event_queue.put({
+            "type": "wake",
+            "container": name,
+            "message": f"Starting container for host: {host}",
+        })
+
+    return JSONResponse(status_code=202, content={"status": "starting", "container": name})
 
 
 @app.get("/containers")

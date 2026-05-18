@@ -99,23 +99,59 @@ func (a *AutoStart) serveLandingPage(rw http.ResponseWriter, host string) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Service Starting...</title>
-    <meta http-equiv="refresh" content="2">
+    <title>Starting `+host+`</title>
     <style>
-        body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f5f5f5; }
-        .container { text-align: center; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-        .spinner { width: 40px; height: 40px; border: 3px solid #e5e5e5; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 1rem; }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: #f3f4f6;
+        }
+        .card {
+            text-align: center;
+            padding: 2.5rem 3rem;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+        }
+        .spinner {
+            width: 44px;
+            height: 44px;
+            border: 3px solid #e5e7eb;
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: spin 0.75s linear infinite;
+            margin: 0 auto 1.5rem;
+        }
         @keyframes spin { to { transform: rotate(360deg); } }
-        h1 { margin: 0 0 0.5rem; color: #1f2937; }
-        p { margin: 0; color: #6b7280; }
+        h1 { font-size: 1.1rem; font-weight: 600; color: #111827; margin-bottom: 0.4rem; }
+        p  { font-size: 0.9rem; color: #6b7280; }
     </style>
 </head>
 <body>
-    <div class="container">
+    <div class="card">
         <div class="spinner"></div>
-        <h1>Starting `+host+`</h1>
-        <p>Please wait...</p>
+        <h1>`+host+`</h1>
+        <p>Starting up&hellip;</p>
     </div>
+    <script>
+        // Poll the current URL every 2 seconds. When the response is no longer a 503
+        // the container is up and Traefik has registered the backend — reload the page.
+        (function () {
+            setInterval(function () {
+                fetch(window.location.href, { credentials: 'include' })
+                    .then(function (r) {
+                        if (r.status !== 503) {
+                            window.location.reload();
+                        }
+                    })
+                    .catch(function () { /* network error — keep waiting */ });
+            }, 2000);
+        }());
+    </script>
 </body>
 </html>`)
 }
