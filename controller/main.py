@@ -219,7 +219,7 @@ async def start_container_task(name: str, group: str, host: str):
             await wait_for_traefik_backend(host)
             print(f"Container {name} ready for host {host}")
             await event_queue.put({
-                "type": "wake",
+                "type": "ready",
                 "container": name,
                 "message": f"Container started for host: {host}",
             })
@@ -316,7 +316,9 @@ def stop_all_managed_containers():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    stop_all_managed_containers()
+    # Stop managed containers in the background so the server becomes available immediately.
+    # Without this, FastAPI blocks all requests until every container has been stopped.
+    asyncio.create_task(asyncio.to_thread(stop_all_managed_containers))
     asyncio.create_task(check_inactivity())
     yield
 
@@ -381,7 +383,7 @@ async def wake(request: Request):
         starting_containers.add(name)
         asyncio.create_task(start_container_task(name, group, host))
         await event_queue.put({
-            "type": "wake",
+            "type": "starting",
             "container": name,
             "message": f"Starting container for host: {host}",
         })
@@ -396,8 +398,6 @@ async def list_containers():
 
     for c in containers:
         name = c["name"]
-        state = containers_state.get(name, {})
-
         stop_delay = c["labels"].get("autostart.stop-delay", "not set")
         last_req = last_request_time.get(name)
 
@@ -416,14 +416,36 @@ async def list_containers():
     return result
 
 
+@app.get("/containers/{name}")
+async def get_container(name: str):
+    """Return the current state of a single managed container."""
+    container = manager.find_container_by_name(name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Container not found")
+    labels = container["labels"]
+    last_req = last_request_time.get(name)
+    return {
+        "name": container["name"],
+        "short_id": container["short_id"],
+        "status": container["status"],
+        "health": manager.get_container_status(name),
+        "stop_delay": labels.get("autostart.stop-delay", "not set"),
+        "last_request": last_req.isoformat() if last_req else None,
+        "service": labels.get("com.docker.compose.service", container["name"]),
+        "project": labels.get("com.docker.compose.project", ""),
+        "labels": labels,
+    }
+
+
 @app.post("/containers/{name}/start")
 async def start_container(name: str):
-    success = manager.start_container(name)
+    success = await asyncio.to_thread(manager.start_container, name)
     if success:
+        last_request_time[name] = datetime.now()
         await event_queue.put({
             "type": "manual_start",
             "container": name,
-            "message": f"Container manually started",
+            "message": "Container manually started",
         })
         return {"status": "ok"}
     raise HTTPException(status_code=500, detail="Failed to start container")

@@ -1,272 +1,307 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Container Sleep Controller</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <style>
-        [x-cloak] { display: none !important; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Container Sleep Controller</title>
+  <script src="https://cdn.twind.style" crossorigin></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+  </style>
 </head>
-<body class="bg-gray-900 text-gray-100" x-data="app()" x-init="init()">
-    <div class="min-h-screen">
-        <nav class="bg-gray-800 border-b border-gray-700">
-            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div class="flex items-center justify-between h-16">
-                    <div class="flex items-center">
-                        <div class="flex-shrink-0">
-                            <svg class="h-8 w-8 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
-                            </svg>
-                        </div>
-                        <span class="ml-2 text-xl font-bold">Container Sleep Controller</span>
-                    </div>
-                    <div class="flex items-center space-x-4">
-                        <span class="text-sm text-gray-400">
-                            Connected: <span :class="connected ? 'text-green-400' : 'text-red-400'" x-text="connected ? 'Yes' : 'No'"></span>
-                        </span>
-                        <button @click="refresh()" class="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded-md text-sm">
-                            Refresh
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </nav>
+<body class="bg-gray-900 text-gray-100 min-h-screen" x-data="app()" x-init="init()" x-cloak>
 
-        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <div class="lg:col-span-2">
-                    <div class="bg-gray-800 rounded-lg shadow-lg border border-gray-700">
-                        <div class="px-6 py-4 border-b border-gray-700 flex justify-between items-center">
-                            <h2 class="text-lg font-semibold">Managed Containers</h2>
-                            <span class="text-sm text-gray-400" x-text="containers.length + ' containers'"></span>
-                        </div>
-                        <div class="overflow-x-auto">
-                            <table class="w-full">
-                                <thead class="bg-gray-750">
-                                    <tr>
-                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Name</th>
-                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Status</th>
-                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Health</th>
-                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Stop Delay</th>
-                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Last Request</th>
-                                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody class="divide-y divide-gray-700">
-                                    <template x-for="container in containers" :key="container.name">
-                                        <tr class="hover:bg-gray-750 transition">
-                                            <td class="px-6 py-4 whitespace-nowrap">
-                                                <div class="flex items-center">
-                                                    <div class="flex-shrink-0 h-8 w-8 flex items-center justify-center bg-gray-700 rounded">
-                                                        <svg class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7"/>
-                                                        </svg>
-                                                    </div>
-                                                    <div class="ml-4">
-                                                        <div class="text-sm font-medium" x-text="container.name"></div>
-                                                        <div class="text-xs text-gray-500" x-text="container.service + (container.project ? ' (' + container.project + ')' : '')"></div>
-                                                    </div>
-                                                </div>
-                                            </td>
-                                            <td class="px-6 py-4 whitespace-nowrap">
-                                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full"
-                                                    :class="{
-                                                        'bg-green-900 text-green-300': container.status === 'running',
-                                                        'bg-red-900 text-red-300': container.status === 'exited' || container.status === 'stopped',
-                                                        'bg-yellow-900 text-yellow-300': container.status === 'starting' || container.status === 'created',
-                                                        'bg-gray-700 text-gray-300': !['running', 'exited', 'stopped', 'starting', 'created'].includes(container.status)
-                                                    }"
-                                                    x-text="container.status">
-                                                </span>
-                                            </td>
-                                            <td class="px-6 py-4 whitespace-nowrap">
-                                                <template x-if="container.health">
-                                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full"
-                                                        :class="{
-                                                            'bg-green-900 text-green-300': container.health === 'healthy',
-                                                            'bg-yellow-900 text-yellow-300': container.health === 'unhealthy',
-                                                            'bg-blue-900 text-blue-300': container.health === 'starting'
-                                                        }"
-                                                        x-text="container.health">
-                                                    </span>
-                                                </template>
-                                                <template x-if="!container.health">
-                                                    <span class="text-gray-500 text-sm">-</span>
-                                                </template>
-                                            </td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-400" x-text="container.stop_delay"></td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
-                                                <template x-if="container.last_request">
-                                                    <span x-text="formatTime(container.last_request)"></span>
-                                                </template>
-                                                <template x-if="!container.last_request">
-                                                    <span class="text-gray-600">Never</span>
-                                                </template>
-                                            </td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                                <button @click="startContainer(container.name)"
-                                                    :disabled="container.status === 'running'"
-                                                    class="text-green-400 hover:text-green-300 disabled:opacity-50 disabled:cursor-not-allowed mr-3">
-                                                    Start
-                                                </button>
-                                                <button @click="stopContainer(container.name)"
-                                                    :disabled="container.status !== 'running'"
-                                                    class="text-red-400 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed">
-                                                    Stop
-                                                </button>
-                                            </td>
-                                        </tr>
-                                    </template>
-                                </tbody>
-                            </table>
-                        </div>
-                        <template x-if="containers.length === 0">
-                            <div class="px-6 py-8 text-center text-gray-500">
-                                No managed containers found. Add <code class="bg-gray-700 px-2 py-1 rounded">traefik.docker.allownonrunning=true</code> to your container labels.
-                            </div>
-                        </template>
-                    </div>
-                </div>
-
-                <div class="lg:col-span-1">
-                    <div class="bg-gray-800 rounded-lg shadow-lg border border-gray-700">
-                        <div class="px-6 py-4 border-b border-gray-700">
-                            <h2 class="text-lg font-semibold">Event Log</h2>
-                        </div>
-                        <div class="px-6 py-4 max-h-96 overflow-y-auto" id="event-log">
-                            <template x-for="(event, index) in events" :key="index">
-                                <div class="mb-3 pb-3 border-b border-gray-700 last:border-0">
-                                    <div class="flex items-start">
-                                        <span class="flex-shrink-0 w-2 h-2 mt-2 rounded-full"
-                                            :class="{
-                                                'bg-green-400': event.type === 'wake' || event.type === 'manual_start',
-                                                'bg-red-400': event.type === 'auto_stop' || event.type === 'manual_stop',
-                                                'bg-blue-400': event.type === 'request',
-                                                'bg-yellow-400': event.type === 'error'
-                                            }">
-                                        </span>
-                                        <div class="ml-3 flex-1">
-                                            <p class="text-sm text-gray-300" x-text="event.message"></p>
-                                            <p class="text-xs text-gray-500 mt-1" x-text="formatTime(event.timestamp)"></p>
-                                        </div>
-                                    </div>
-                                </div>
-                            </template>
-                            <template x-if="events.length === 0">
-                                <div class="text-center text-gray-500 py-4">No events yet</div>
-                            </template>
-                        </div>
-                    </div>
-
-                    <div class="mt-6 bg-gray-800 rounded-lg shadow-lg border border-gray-700 p-6">
-                        <h3 class="text-md font-semibold mb-4">Quick Stats</h3>
-                        <div class="grid grid-cols-2 gap-4">
-                            <div class="bg-gray-700 rounded p-4">
-                                <div class="text-2xl font-bold text-green-400" x-text="runningCount"></div>
-                                <div class="text-sm text-gray-400">Running</div>
-                            </div>
-                            <div class="bg-gray-700 rounded p-4">
-                                <div class="text-2xl font-bold text-red-400" x-text="stoppedCount"></div>
-                                <div class="text-sm text-gray-400">Stopped</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </main>
+  <!-- Nav -->
+  <nav class="bg-gray-800 border-b border-gray-700 px-6 h-14 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <svg class="h-6 w-6 text-blue-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
+      </svg>
+      <span class="font-semibold">Container Sleep Controller</span>
     </div>
+    <div class="flex items-center gap-4 text-sm text-gray-400">
+      <span>
+        SSE:&nbsp;<span :class="connected ? 'text-green-400' : 'text-red-400'" x-text="connected ? 'connected' : 'disconnected'"></span>
+      </span>
+    </div>
+  </nav>
 
-    <script>
-        function app() {
-            return {
-                containers: [],
-                events: [],
-                connected: false,
-                eventSource: null,
+  <!-- Main -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
-                get runningCount() {
-                    return this.containers.filter(c => c.status === 'running').length;
-                },
+    <!-- Loading state -->
+    <template x-if="loading">
+      <div class="flex items-center justify-center py-24 text-gray-500">
+        <svg class="animate-spin h-6 w-6 mr-3 text-blue-400" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+        </svg>
+        Loading containers…
+      </div>
+    </template>
 
-                get stoppedCount() {
-                    return this.containers.filter(c => c.status !== 'running').length;
-                },
+    <template x-if="!loading">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-                async init() {
-                    await this.refresh();
-                    this.connectSSE();
-                    this.startAutoRefresh();
-                },
+        <!-- Containers table -->
+        <div class="lg:col-span-2 bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+          <div class="px-6 py-4 border-b border-gray-700 flex items-center justify-between">
+            <h2 class="font-semibold">Managed Containers</h2>
+            <span class="text-sm text-gray-400" x-text="containers.length + ' container' + (containers.length !== 1 ? 's' : '')"></span>
+          </div>
 
-                async refresh() {
-                    try {
-                        const res = await fetch('/containers');
-                        if (res.ok) {
-                            this.containers = await res.json();
-                            this.connected = true;
-                        } else {
-                            this.connected = false;
-                        }
-                    } catch (e) {
-                        console.error('Failed to fetch containers:', e);
-                        this.connected = false;
-                    }
-                },
+          <template x-if="containers.length === 0">
+            <div class="px-6 py-10 text-center text-gray-500 text-sm">
+              No managed containers found.<br>
+              Add <code class="bg-gray-700 px-1.5 py-0.5 rounded text-gray-300 text-xs">autostart.enable=true</code> to your container labels.
+            </div>
+          </template>
 
-                connectSSE() {
-                    this.eventSource = new EventSource('/events');
+          <template x-if="containers.length > 0">
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-xs font-medium text-gray-400 uppercase tracking-wider border-b border-gray-700">
+                    <th class="px-6 py-3">Container</th>
+                    <th class="px-6 py-3">Status</th>
+                    <th class="px-6 py-3">Health</th>
+                    <th class="px-6 py-3">Stop Delay</th>
+                    <th class="px-6 py-3">Last Request</th>
+                    <th class="px-6 py-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-700">
+                  <template x-for="c in containers" :key="c.name">
+                    <tr class="hover:bg-gray-750 transition-colors">
 
-                    this.eventSource.onmessage = (event) => {
-                        try {
-                            const data = JSON.parse(event.data);
-                            this.events.unshift({
-                                ...data,
-                                timestamp: new Date().toISOString()
-                            });
-                            if (this.events.length > 50) {
-                                this.events.pop();
-                            }
-                            this.refresh();
-                        } catch (e) {
-                            console.error('Failed to parse event:', e);
-                        }
-                    };
+                      <!-- Name -->
+                      <td class="px-6 py-3.5">
+                        <div class="font-medium text-gray-200" x-text="c.name"></div>
+                        <div class="text-xs text-gray-500 mt-0.5"
+                          x-text="c.service + (c.project ? ' · ' + c.project : '')"></div>
+                      </td>
 
-                    this.eventSource.onerror = () => {
-                        setTimeout(() => this.connectSSE(), 5000);
-                    };
-                },
+                      <!-- Status -->
+                      <td class="px-6 py-3.5">
+                        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold"
+                          :class="{
+                            'bg-green-900/60 text-green-300':  c.status === 'running',
+                            'bg-yellow-900/60 text-yellow-300': c.status === 'starting' || c.status === 'created',
+                            'bg-red-900/60 text-red-300':      c.status === 'exited' || c.status === 'stopped',
+                            'bg-gray-700 text-gray-300':       !['running','exited','stopped','starting','created'].includes(c.status)
+                          }">
+                          <span class="w-1.5 h-1.5 rounded-full"
+                            :class="{
+                              'bg-green-400':  c.status === 'running',
+                              'bg-yellow-400': c.status === 'starting' || c.status === 'created',
+                              'bg-red-400':    c.status === 'exited' || c.status === 'stopped',
+                              'bg-gray-400':   !['running','exited','stopped','starting','created'].includes(c.status)
+                            }"></span>
+                          <span x-text="c.status"></span>
+                        </span>
+                      </td>
 
-                startAutoRefresh() {
-                    setInterval(() => this.refresh(), 30000);
-                },
+                      <!-- Health -->
+                      <td class="px-6 py-3.5">
+                        <template x-if="c.health && c.health !== c.status">
+                          <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-semibold"
+                            :class="{
+                              'bg-green-900/60 text-green-300':  c.health === 'healthy',
+                              'bg-yellow-900/60 text-yellow-300': c.health === 'starting' || c.health === 'unhealthy',
+                              'bg-blue-900/60 text-blue-300':    c.health === 'checking'
+                            }"
+                            x-text="c.health">
+                          </span>
+                        </template>
+                        <template x-if="!c.health || c.health === c.status">
+                          <span class="text-gray-600">—</span>
+                        </template>
+                      </td>
 
-                async startContainer(name) {
-                    try {
-                        await fetch(`/containers/${name}/start`, { method: 'POST' });
-                    } catch (e) {
-                        console.error('Failed to start container:', e);
-                    }
-                },
+                      <!-- Stop delay -->
+                      <td class="px-6 py-3.5 text-gray-400" x-text="c.stop_delay"></td>
 
-                async stopContainer(name) {
-                    try {
-                        await fetch(`/containers/${name}/stop`, { method: 'POST' });
-                    } catch (e) {
-                        console.error('Failed to stop container:', e);
-                    }
-                },
+                      <!-- Last request -->
+                      <td class="px-6 py-3.5 text-gray-400">
+                        <template x-if="c.last_request">
+                          <span x-text="relativeTime(c.last_request)"></span>
+                        </template>
+                        <template x-if="!c.last_request">
+                          <span class="text-gray-600">Never</span>
+                        </template>
+                      </td>
 
-                formatTime(isoString) {
-                    if (!isoString) return '';
-                    const date = new Date(isoString);
-                    return date.toLocaleTimeString();
-                }
-            };
-        }
-    </script>
+                      <!-- Actions -->
+                      <td class="px-6 py-3.5 text-right space-x-3">
+                        <button @click="startContainer(c.name)"
+                          :disabled="c.status === 'running' || c.status === 'starting'"
+                          class="text-green-400 hover:text-green-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+                          Start
+                        </button>
+                        <button @click="stopContainer(c.name)"
+                          :disabled="c.status !== 'running'"
+                          class="text-red-400 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+                          Stop
+                        </button>
+                      </td>
+
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+
+        <!-- Right column -->
+        <div class="space-y-6">
+
+          <!-- Stats -->
+          <div class="grid grid-cols-2 gap-3">
+            <div class="bg-gray-800 rounded-xl border border-gray-700 p-4">
+              <div class="text-2xl font-bold text-green-400" x-text="runningCount"></div>
+              <div class="text-xs text-gray-400 mt-0.5">Running</div>
+            </div>
+            <div class="bg-gray-800 rounded-xl border border-gray-700 p-4">
+              <div class="text-2xl font-bold text-gray-400" x-text="stoppedCount"></div>
+              <div class="text-xs text-gray-400 mt-0.5">Stopped</div>
+            </div>
+          </div>
+
+          <!-- Event log -->
+          <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+            <div class="px-5 py-3.5 border-b border-gray-700 flex items-center justify-between">
+              <h2 class="font-semibold text-sm">Event Log</h2>
+              <span class="text-xs text-gray-500" x-text="events.length + ' events'"></span>
+            </div>
+            <div class="divide-y divide-gray-700/50 max-h-96 overflow-y-auto" id="event-log">
+              <template x-if="events.length === 0">
+                <div class="px-5 py-6 text-center text-gray-600 text-sm">No events yet</div>
+              </template>
+              <template x-for="(ev, i) in events" :key="i">
+                <div class="px-5 py-2.5 flex items-start gap-3">
+                  <span class="mt-1.5 shrink-0 w-2 h-2 rounded-full"
+                    :class="{
+                      'bg-blue-400':   ev.type === 'starting',
+                      'bg-green-400':  ev.type === 'ready' || ev.type === 'manual_start',
+                      'bg-red-400':    ev.type === 'auto_stop' || ev.type === 'manual_stop',
+                      'bg-gray-400':   ev.type === 'request',
+                      'bg-yellow-400': ev.type === 'error'
+                    }">
+                  </span>
+                  <div class="min-w-0">
+                    <p class="text-sm text-gray-300 truncate" x-text="ev.message"></p>
+                    <p class="text-xs text-gray-600 mt-0.5" x-text="relativeTime(ev.timestamp)"></p>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </template>
+  </main>
+
+  <script>
+    function app() {
+      return {
+        containers: [],
+        events:     [],
+        connected:  false,
+        loading:    true,
+        _sse:       null,
+
+        get runningCount() { return this.containers.filter(c => c.status === 'running').length; },
+        get stoppedCount() { return this.containers.filter(c => c.status !== 'running').length; },
+
+        async init() {
+          await this.fetchAll();
+          this.connectSSE();
+        },
+
+        // Initial full load — only called once on page load.
+        async fetchAll() {
+          this.loading = true;
+          try {
+            const res = await fetch('/containers');
+            if (res.ok) {
+              this.containers = await res.json();
+              this.connected  = true;
+            }
+          } catch (e) {
+            console.error('Failed to fetch containers:', e);
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        // Targeted single-container refresh — called on state-changing SSE events.
+        async fetchOne(name) {
+          try {
+            const res = await fetch(`/containers/${encodeURIComponent(name)}`);
+            if (!res.ok) return;
+            const updated = await res.json();
+            const idx = this.containers.findIndex(c => c.name === name);
+            if (idx >= 0) {
+              // Splice for Alpine reactivity
+              this.containers.splice(idx, 1, updated);
+            } else {
+              this.containers.push(updated);
+            }
+          } catch (e) {
+            console.error('Failed to fetch container:', name, e);
+          }
+        },
+
+        connectSSE() {
+          if (this._sse) this._sse.close();
+          this._sse = new EventSource('/events');
+
+          this._sse.onopen = () => { this.connected = true; };
+
+          this._sse.onmessage = (e) => {
+            let data;
+            try { data = JSON.parse(e.data); } catch { return; }
+
+            // Prepend to event log, cap at 100 entries
+            this.events.unshift({ ...data, timestamp: new Date().toISOString() });
+            if (this.events.length > 100) this.events.length = 100;
+
+            // Only hit the API for events that change container state.
+            // 'request' fires on every proxied request and carries no state change.
+            const stateEvents = ['starting', 'ready', 'auto_stop', 'manual_start', 'manual_stop', 'error'];
+            if (data.container && stateEvents.includes(data.type)) {
+              this.fetchOne(data.container);
+            }
+          };
+
+          this._sse.onerror = () => {
+            this.connected = false;
+            this._sse.close();
+            setTimeout(() => this.connectSSE(), 5000);
+          };
+        },
+
+        async startContainer(name) {
+          await fetch(`/containers/${encodeURIComponent(name)}/start`, { method: 'POST' });
+        },
+
+        async stopContainer(name) {
+          await fetch(`/containers/${encodeURIComponent(name)}/stop`, { method: 'POST' });
+        },
+
+        relativeTime(iso) {
+          if (!iso) return '';
+          const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
+          if (diff < 60)   return diff + 's ago';
+          if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+          return Math.floor(diff / 3600) + 'h ago';
+        },
+      };
+    }
+  </script>
 </body>
 </html>
