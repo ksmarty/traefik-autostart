@@ -1,4 +1,4 @@
 experimental:
   localPlugins:
     autostart:
-      moduleName: github.com/ksmarty/traefik-container-sleep
+      moduleName: github.com/ksmarty/traefik-autostart

@@ -57,8 +57,12 @@ def _fetch_container_data(name: str, override_status: str | None = None) -> dict
 
     Uses one Docker API call (GET /containers/{id}/json) to obtain both status
     and health in a single round-trip. Returns None if the container is not found.
-    override_status lets callers substitute a virtual status (e.g. "starting")
-    for the Docker-reported one.
+
+    If override_status is given it takes priority. Otherwise, containers that are
+    in `starting_containers` report "starting" regardless of Docker status — this
+    prevents sync events from showing "running" before both Docker health AND
+    Traefik registration are confirmed, which would make the webui appear ahead
+    of the loading page.
     """
     try:
         c = manager.docker.containers.get(name)
@@ -66,10 +70,16 @@ def _fetch_container_data(name: str, override_status: str | None = None) -> dict
         health_info = c.attrs.get("State", {}).get("Health", {})
         health = health_info.get("Status", c.status) if health_info else c.status
         last_req = last_request_time.get(name)
+        if override_status is not None:
+            effective_status = override_status
+        elif name in starting_containers:
+            effective_status = "starting"
+        else:
+            effective_status = c.status
         return {
             "name": c.name,
             "short_id": c.short_id,
-            "status": override_status if override_status is not None else c.status,
+            "status": effective_status,
             "health": health,
             "stop_delay": labels.get("autostart.stop-delay", "not set"),
             "last_request": last_req.isoformat() if last_req else None,
@@ -105,10 +115,14 @@ def _fetch_all_containers_data() -> list[dict]:
         health_info = c.attrs.get("State", {}).get("Health", {})
         health = health_info.get("Status", c.status) if health_info else c.status
         last_req = last_request_time.get(c.name)
+        # Use "starting" if the container is in our in-flight set — same logic as
+        # _fetch_container_data — so periodic sync events never show "running" while
+        # Traefik hasn't registered the backend yet.
+        status = "starting" if c.name in starting_containers else c.status
         result.append({
             "name": c.name,
             "short_id": c.short_id,
-            "status": c.status,
+            "status": status,
             "health": health,
             "stop_delay": labels.get("autostart.stop-delay", "not set"),
             "last_request": last_req.isoformat() if last_req else None,
@@ -314,29 +328,50 @@ async def periodic_container_sync():
 
 
 async def start_container_task(name: str, group: str, host: str):
-    """Start a container in the background, then wait for Traefik to register the backend.
+    """Start the targeted container and all co-group members concurrently.
 
-    Keeps `name` in `starting_containers` until both conditions are true so that
-    concurrent /wake calls return 202 rather than 200 until the service is actually ready.
+    All containers in the group are kicked off at the same time via asyncio.gather
+    so there is no sequential delay between members. Each manager.start_container
+    call blocks until that container is healthy; the slowest member determines the
+    total startup time.
+
+    Only after every concurrent start returns AND Traefik has registered the
+    targeted backend is the whole group considered ready. The 'ready' broadcast
+    is sent for every member so the webui updates all rows at once.
     """
+    # Collect all containers to start: targeted + non-running group members.
+    to_start: list[str] = []
     try:
-        success = await asyncio.to_thread(manager.start_container, name)
-        if success:
-            if group:
-                await asyncio.to_thread(start_group, group, name)
-            # Wait for Traefik to pick up the new backend before marking ready.
-            # Without this, the middleware forwards the request into an empty backend pool.
-            await wait_for_traefik_backend(host)
-            print(f"Container {name} ready for host {host}")
-            state = await asyncio.to_thread(_fetch_container_data, name)
-            await broadcast({
-                "type": "ready",
-                "container": name,
-                "message": f"Container started for host: {host}",
-                "state": state,
-            })
+        if group:
+            members = await asyncio.to_thread(_get_group_members, group)
+            to_start = [c["name"] for c in members]
+            if name not in to_start:
+                to_start.insert(0, name)
         else:
-            print(f"Failed to start container {name}")
+            to_start = [name]
+
+        # Start all concurrently. manager.start_container is a no-op for already-running
+        # containers, so it is safe to include every group member unconditionally.
+        results = await asyncio.gather(
+            *[asyncio.to_thread(manager.start_container, n) for n in to_start],
+            return_exceptions=True,
+        )
+
+        # The targeted container must succeed; group member failures are logged but
+        # don't block the redirect.
+        target_idx = to_start.index(name)
+        target_ok = results[target_idx] is True and not isinstance(results[target_idx], Exception)
+
+        if target_ok:
+            await wait_for_traefik_backend(host)
+            print(f"Group ready: {to_start} for host {host}")
+            for n, result in zip(to_start, results):
+                state = await asyncio.to_thread(_fetch_container_data, n)
+                msg = (f"Container started for host: {host}" if n == name
+                       else f"Container started as part of group '{group}'")
+                await broadcast({"type": "ready", "container": n, "message": msg, "state": state})
+        else:
+            print(f"Failed to start targeted container {name}")
             state = await asyncio.to_thread(_fetch_container_data, name)
             await broadcast({
                 "type": "error",
@@ -344,8 +379,20 @@ async def start_container_task(name: str, group: str, host: str):
                 "message": f"Failed to start container for host: {host}",
                 "state": state,
             })
+    except Exception as e:
+        print(f"start_container_task error: {e}")
+        state = await asyncio.to_thread(_fetch_container_data, name)
+        await broadcast({
+            "type": "error",
+            "container": name,
+            "message": f"Failed to start container for host: {host}",
+            "state": state,
+        })
     finally:
-        starting_containers.discard(name)
+        # Remove every group member from starting_containers, not just the targeted one.
+        for n in to_start:
+            starting_containers.discard(n)
+        starting_containers.discard(name)  # safety: handle empty to_start
 
 
 async def check_inactivity():
@@ -465,11 +512,26 @@ app.add_middleware(
 )
 
 
-def start_group(group: str, exclude_name: str = None):
-    containers = manager.find_managed_containers()
-    for c in containers:
-        if c["group"] == group and c["name"] != exclude_name and c["status"] != "running":
-            manager.start_container(c["name"])
+def _get_group_members(group: str) -> list[dict]:
+    """Blocking. Return all managed containers that belong to the given group."""
+    if not group:
+        return []
+    return [c for c in manager.find_managed_containers()
+            if c["labels"].get("autostart.group") == group]
+
+
+def _build_group_status(members: list[dict]) -> list[dict]:
+    """Build the per-container status list embedded in /wake 202 responses."""
+    result = []
+    for c in members:
+        if c["status"] == "running" and c["name"] not in starting_containers:
+            st = "ready"
+        elif c["name"] in starting_containers:
+            st = "starting"
+        else:
+            st = c["status"]
+        result.append({"name": c["name"], "status": st})
+    return result
 
 
 @app.post("/wake")
@@ -493,27 +555,65 @@ async def wake(request: Request):
 
     now = datetime.now(timezone.utc)
     last_request_time[name] = now
-    containers_state[name] = {
-        "status": manager.get_container_status(name),
-        "last_request": now.isoformat(),
-        "labels": labels,
-    }
 
-    # Container is running and Traefik backend is ready — forward the request.
+    # ── Fast path: targeted container is running ──────────────────────────────
     if container["status"] == "running" and name not in starting_containers:
-        return {"status": "ok", "container": name}
+        if group:
+            members = await asyncio.to_thread(_get_group_members, group)
+            all_ready = all(
+                c["status"] == "running" and c["name"] not in starting_containers
+                for c in members
+            )
+            if not all_ready:
+                # Some group members are still starting — keep the progress page alive.
+                start_time = container_start_times.get(name, now)
+                elapsed = int((now - start_time).total_seconds())
+                return JSONResponse(status_code=202, content={
+                    "status": "starting",
+                    "container": name,
+                    "group_name": group,
+                    "elapsed": elapsed,
+                    "group": _build_group_status(members),
+                })
+            # Every member is running — return 200 and include the final group state
+            # so the middleware can flash the all-green list before redirecting.
+            group_status = [{"name": c["name"], "status": "ready"} for c in members]
+            return JSONResponse(content={"status": "ok", "container": name, "group": group_status})
 
-    # Container needs to start — fire a background task and return 202 immediately.
-    # Multiple simultaneous requests (e.g. page refresh) are safe: only the first call
-    # adds the name to starting_containers and creates the task; subsequent calls just
-    # recalculate elapsed/group to return up-to-date info in the 202 body.
+        return JSONResponse(content={"status": "ok", "container": name, "group": []})
+
+    # ── Slow path: start containers ───────────────────────────────────────────
+    # Only the first concurrent /wake call for this container fires the task;
+    # subsequent calls fall through to the 202 response below.
+    group_members_pre: list[dict] = []
     if name not in starting_containers:
         starting_containers.add(name)
         container_start_times[name] = now
+
+        # Pre-add every non-running group member to starting_containers immediately
+        # so that sync events and subsequent /wake group-status checks all report
+        # "starting" for the whole group from the very first response.
+        if group:
+            group_members_pre = await asyncio.to_thread(_get_group_members, group)
+            for c in group_members_pre:
+                if c["name"] != name and c["status"] != "running":
+                    starting_containers.add(c["name"])
+
         asyncio.create_task(start_container_task(name, group, host))
-        # Override status to "starting" in the embedded state: Docker still reports
-        # "exited" at this point since the container process hasn't launched yet.
-        state = await asyncio.to_thread(_fetch_container_data, name, "starting")
+
+        # Broadcast a "starting" event for every group member that just entered
+        # the starting state so the webui immediately reflects the change.
+        for c in group_members_pre:
+            if c["name"] != name and c["name"] in starting_containers:
+                m_state = await asyncio.to_thread(_fetch_container_data, c["name"])
+                await broadcast({
+                    "type": "starting",
+                    "container": c["name"],
+                    "message": f"Starting container as part of group '{group}'",
+                    "state": m_state,
+                })
+
+        state = await asyncio.to_thread(_fetch_container_data, name)
         await broadcast({
             "type": "starting",
             "container": name,
@@ -521,21 +621,14 @@ async def wake(request: Request):
             "state": state,
         })
 
-    # Build per-container group status for the loading page.
-    group_status = []
+    # Build group status for the 202 response.
+    # Re-use the pre-fetched member list (first request) or fetch it now (concurrent request).
     if group:
-        for c in manager.find_managed_containers():
-            if c["labels"].get("autostart.group") == group:
-                if c["status"] == "running" and c["name"] not in starting_containers:
-                    st = "ready"
-                elif c["name"] in starting_containers:
-                    st = "starting"
-                else:
-                    st = c["status"]
-                group_status.append({"name": c["name"], "status": st})
+        members = group_members_pre or await asyncio.to_thread(_get_group_members, group)
+        group_status = _build_group_status(members)
+    else:
+        group_status = []
 
-    # Tell the middleware how long this container has been starting so that a page
-    # refresh shows the right phase message instead of resetting to "Starting (0s)".
     start_time = container_start_times.get(name, now)
     elapsed = int((now - start_time).total_seconds())
 

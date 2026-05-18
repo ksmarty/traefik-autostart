@@ -1,5 +1,5 @@
-// Package traefik_container_sleep is a Traefik plugin that wakes Docker containers on request.
-package traefik_container_sleep
+// Package traefik_autostart is a Traefik plugin that wakes Docker containers on request.
+package traefik_autostart
 
 import (
 	"context"
@@ -162,7 +162,16 @@ func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 			result = a.callWake(req.Context(), host)
 			if result.ready {
-				push(rw, flusher, canFlush, "window.location.reload()")
+				// Push a final "all ready" group update so every member shows green
+				// before the page navigates. The 500 ms pause lets the user see the
+				// complete state; for non-group containers it just delays the reload
+				// by a negligible amount.
+				if len(result.group) > 1 {
+					push(rw, flusher, canFlush, fmt.Sprintf(
+						`u('Ready\u2026',%d,%s)`, elapsed, groupToJS(result.group),
+					))
+				}
+				push(rw, flusher, canFlush, "setTimeout(function(){window.location.reload()},500)")
 				return
 			}
 
@@ -210,7 +219,11 @@ func (a *AutoStart) callWake(ctx context.Context, host string) wakeResult {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
-		return wakeResult{ready: true}
+		// Parse the body even on 200 — the controller includes the final group state
+		// so the loading page can flash the all-green list before redirecting.
+		var rb wakeRespBody
+		json.NewDecoder(resp.Body).Decode(&rb) //nolint
+		return wakeResult{ready: true, group: rb.Group}
 	}
 
 	// Parse 202 body — best-effort; ignore errors.

@@ -1,6 +1,6 @@
-displayName: Auto Start Middleware
+displayName: Autostart
 type: middleware
-import: github.com/ksmarty/traefik-container-sleep
+import: github.com/ksmarty/traefik-autostart
 
 summary: Automatically starts Docker containers on incoming HTTP requests and stops them after inactivity.
 
