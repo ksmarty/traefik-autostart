@@ -1,146 +1,234 @@
 # traefik-container-sleep
 
-A "Wake-on-Request" system for Traefik v3 that automatically starts Docker containers on incoming HTTP requests and stops them after a configurable period of inactivity.
+Wake-on-request for Docker containers. Keeps services stopped when idle, starts them automatically when traffic arrives, and stops them again after a configurable inactivity timeout.
 
-## Installation
+**How it works:**
+1. The Traefik plugin intercepts a request and calls the controller
+2. The controller starts the target container and waits until it's healthy
+3. The request is forwarded — a loading page is shown in the meantime
+4. After `autostart.stop-delay` of inactivity, the controller stops the container
 
-### Controller
+---
+
+## Requirements
+
+- Traefik v3
+- Docker with socket access
+- The plugin must be loaded as a **local plugin** (it is not yet in the Traefik Plugin Catalog)
+
+---
+
+## 1. Get the plugin files
+
+Download the latest release and extract the plugin files:
 
 ```bash
-docker pull ghcr.io/ksmarty/traefik-container-sleep:latest
+mkdir -p ./plugin
+curl -sL https://github.com/ksmarty/traefik-container-sleep/releases/latest/download/plugin.tar.gz \
+  | tar -xz -C ./plugin
 ```
 
-### Traefik Plugin
+This gives you `./plugin/middleware.go`, `./plugin/.traefik.yml`, and `./plugin/go.mod`.
 
-#### Using Traefik CLI (Recommended)
+---
 
-```bash
-traefik plugin create github.com/ksmarty/traefik-container-sleep
+## 2. Configure Traefik
+
+Mount the plugin directory into Traefik and register it as a local plugin.
+
+### Volume mount
+
+```
+./plugin:/plugins-local/src/github.com/ksmarty/traefik-container-sleep:ro
 ```
 
-Then add to your static config:
+### Static config
 
+Pick one format:
+
+**CLI flags**
+```
+--experimental.localPlugins.autostart.modulename=github.com/ksmarty/traefik-container-sleep
+```
+
+**YAML** (`traefik.yml`)
 ```yaml
 experimental:
-  plugins:
-    github.com/ksmarty/traefik-container-sleep:
-      version: v1.0.0
+  localPlugins:
+    autostart:
+      moduleName: github.com/ksmarty/traefik-container-sleep
 ```
 
-Or configure the URL manually:
-
-```yaml
-experimental:
-  plugins:
-    github.com/ksmarty/traefik-container-sleep:
-      version: v1.0.0
-      url: https://github.com/ksmarty/traefik-container-sleep/releases/download/v1.0.0/plugin.tar.gz
+**TOML** (`traefik.toml`)
+```toml
+[experimental.localPlugins.autostart]
+  moduleName = "github.com/ksmarty/traefik-container-sleep"
 ```
 
-## Quick Start
-
-```yaml
-version: "3.8"
-
-services:
-  traefik:
-    image: traefik:v3.1
-    command:
-      - "--api.insecure=true"
-      - "--providers.docker=true"
-      - "--providers.file.directory=/etc/traefik/dynamic"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./dynamic.yaml:/etc/traefik/dynamic/dynamic.yaml
-
-  controller:
-    image: ghcr.io/ksmarty/traefik-container-sleep:latest
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - TRAEFIK_API_URL=http://traefik:8080
-```
-
-Create `dynamic.yaml`:
+### Dynamic config (middleware definition)
 
 ```yaml
 http:
   middlewares:
     autostart:
       plugin:
-        github.com/ksmarty/traefik-container-sleep:
+        autostart:
+          timeout: 30                        # seconds to wait for container to become ready
+          url: http://controller:5000/wake   # controller address
+```
+
+---
+
+## 3. Run the controller
+
+The controller needs access to the Docker socket and the Traefik API.
+
+**docker run**
+```bash
+docker run -d \
+  --name controller \
+  --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e TRAEFIK_API_URL=http://traefik:8080 \
+  -p 5000:5000 \
+  ghcr.io/ksmarty/traefik-container-sleep:latest
+```
+
+**docker compose**
+```yaml
+controller:
+  image: ghcr.io/ksmarty/traefik-container-sleep:latest
+  restart: unless-stopped
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+  environment:
+    - TRAEFIK_API_URL=http://traefik:8080
+  ports:
+    - "5000:5000"
+```
+
+**Environment variables**
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRAEFIK_API_URL` | `http://traefik:8080` | Traefik API endpoint |
+| `DOCKER_SOCKET` | `/var/run/docker.sock` | Docker socket path |
+
+---
+
+## 4. Label your containers
+
+Add these labels to any container you want managed:
+
+```yaml
+labels:
+  - "autostart.enable=true"                                  # opt in to management
+  - "traefik.enable=true"
+  - "traefik.docker.allownonrunning=true"                    # keep Traefik route alive while stopped
+  - "traefik.http.routers.myapp.rule=Host(`myapp.example.com`)"
+  - "traefik.http.routers.myapp.middlewares=autostart"
+  - "traefik.http.services.myapp.loadbalancer.server.port=80"
+```
+
+**Optional labels**
+
+| Label | Default | Description |
+|---|---|---|
+| `autostart.stop-delay` | `10m` | Idle time before the container is stopped (`30s`, `5m`, `1h`) |
+| `autostart.group` | — | Stop/start multiple containers together |
+
+---
+
+## Full docker-compose example
+
+```yaml
+services:
+  traefik:
+    image: traefik:v3
+    restart: unless-stopped
+    command:
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --entrypoints.web.address=:80
+      - --experimental.localPlugins.autostart.modulename=github.com/ksmarty/traefik-container-sleep
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./plugin:/plugins-local/src/github.com/ksmarty/traefik-container-sleep:ro
+      - ./dynamic.yml:/etc/traefik/dynamic/dynamic.yml:ro
+
+  controller:
+    image: ghcr.io/ksmarty/traefik-container-sleep:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TRAEFIK_API_URL=http://traefik:8080
+    depends_on:
+      - traefik
+
+  myapp:
+    image: nginx:alpine
+    labels:
+      - "autostart.enable=true"
+      - "autostart.stop-delay=10m"
+      - "traefik.enable=true"
+      - "traefik.docker.allownonrunning=true"
+      - "traefik.http.routers.myapp.rule=Host(`myapp.example.com`)"
+      - "traefik.http.routers.myapp.middlewares=autostart"
+      - "traefik.http.services.myapp.loadbalancer.server.port=80"
+```
+
+`dynamic.yml`:
+```yaml
+http:
+  middlewares:
+    autostart:
+      plugin:
+        autostart:
           timeout: 30
           url: http://controller:5000/wake
 ```
 
-## Configuration
+---
 
-### Container Labels
+## Grouping containers
 
-Add these labels to your containers to enable auto-start:
-
-```yaml
-labels:
-  - "autostart.enable=true"
-  - "traefik.docker.allownonrunning=true"
-  - "traefik.enable=true"
-  - "traefik.http.routers.myservice.rule=Host(`myapp.local`)"
-  - "traefik.http.routers.myservice.middlewares=autostart"
-```
-
-The `autostart.enable=true` label tells the controller to manage this container. The `traefik.docker.allownonrunning=true` label keeps Traefik's router active while the container is stopped.
-
-The `autostart.enable=true` label enables auto-start management. The `autostart.stop-delay` label configures how long to wait before stopping an idle container.
-
-### Optional Labels
-
-| Label | Description |
-|-------|-------------|
-| `autostart.stop-delay` | Duration before stopping idle container (default: 10m) |
-| `autostart.group` | Group name to start/stop containers together |
-
-Example with all options:
+Containers in the same group start and stop together. If any container in the group goes idle, all containers in the group are stopped.
 
 ```yaml
 labels:
   - "autostart.enable=true"
-  - "autostart.group=frontend"
+  - "autostart.group=mystack"
   - "autostart.stop-delay=5m"
-  - "traefik.enable=true"
-  - "traefik.http.routers.app.rule=Host(`app.local`)"
-  - "traefik.http.routers.app.middlewares=autostart"
 ```
 
-### Supported Duration Formats
+---
 
-- `30s` - 30 seconds
-- `5m` - 5 minutes
-- `1h` - 1 hour
+## Controller dashboard
 
-## API Endpoints
+The controller exposes a web dashboard at `http://controller:5000/` showing live container status, last request times, and manual start/stop controls.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/wake` | Wake a container by host |
-| GET | `/containers` | List all managed containers |
-| POST | `/containers/{name}/start` | Manually start a container |
-| POST | `/containers/{name}/stop` | Manually stop a container |
-| GET | `/events` | SSE event stream |
-| GET | `/health` | Health check |
+---
 
 ## Troubleshooting
 
-### Container Not Starting
-Check container has `autostart.enable=true` label. Verify middleware is applied. Check controller logs.
+**Plugin not loading**
+- Confirm the `./plugin/` directory contains `middleware.go`, `.traefik.yml`, and `go.mod`
+- Confirm the volume mount path is exactly `/plugins-local/src/github.com/ksmarty/traefik-container-sleep`
+- Check Traefik logs for plugin errors
 
-### Docker Socket Access
-Ensure the controller has access to `/var/run/docker.sock`:
+**Container not found for host**
+- Ensure `autostart.enable=true` is set on the container
+- Ensure the container has an explicit `traefik.http.routers.*.rule=Host(...)` label
+- Check that `TRAEFIK_API_URL` points to the Traefik API port (default `8080`)
+- Verify `traefik.docker.allownonrunning=true` is set so the route exists while stopped
 
-```yaml
-volumes:
-  - /var/run/docker.sock:/var/run/docker.sock
-```
-
-## License
-
-MIT
+**Container starts but request isn't forwarded**
+- The controller returns 200 only after the container is `running` (with health check: `healthy`)
+- Increase `timeout` in the middleware config if your container takes longer to start
+- Check controller logs: `docker logs controller`

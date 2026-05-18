@@ -15,7 +15,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Read current version
         id: version
@@ -54,7 +54,7 @@ jobs:
           MAJOR=${parts[0]}
           MINOR=${parts[1]}
           PATCH=${parts[2]}
-          NEW_VERSION="$MAJOR.$((MINOR+1)).$PATCH"
+          NEW_VERSION="$MAJOR.$MINOR.$((PATCH+1))"
           echo $NEW_VERSION > VERSION
           git config user.name github-actions
           git config user.email github-actions@github.com

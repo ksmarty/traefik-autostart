@@ -1,5 +1,5 @@
-// Plugin a autostart plugin.
-package main
+// Package traefik_container_sleep is a Traefik plugin that wakes Docker containers on request.
+package traefik_container_sleep
 
 import (
 	"context"
@@ -11,15 +11,18 @@ import (
 )
 
 const (
-	defaultTimeout = 30 * time.Second
-	defaultURL      = "http://controller:5000/wake"
+	defaultTimeout = 30 // seconds
+	defaultURL     = "http://controller:5000/wake"
 )
 
+// Config is the plugin configuration.
 type Config struct {
-	Timeout time.Duration `json:"timeout"`
-	URL     string        `json:"url"`
+	// Timeout is the maximum seconds to wait for the controller to wake a container.
+	Timeout int    `json:"timeout"`
+	URL     string `json:"url"`
 }
 
+// CreateConfig returns the default plugin configuration.
 func CreateConfig() *Config {
 	return &Config{
 		Timeout: defaultTimeout,
@@ -27,6 +30,7 @@ func CreateConfig() *Config {
 	}
 }
 
+// AutoStart is the plugin middleware.
 type AutoStart struct {
 	next    http.Handler
 	timeout time.Duration
@@ -34,10 +38,11 @@ type AutoStart struct {
 	name    string
 }
 
+// New creates a new AutoStart middleware instance.
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
 	return &AutoStart{
 		next:    next,
-		timeout: config.Timeout,
+		timeout: time.Duration(config.Timeout) * time.Second,
 		url:     config.URL,
 		name:    name,
 	}, nil

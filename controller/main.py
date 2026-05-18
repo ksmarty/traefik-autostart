@@ -51,34 +51,46 @@ class ContainerManager:
         self.lock = threading.Lock()
 
     def find_container_by_host(self, host: str) -> Optional[dict]:
+        managed = self.find_managed_containers()
+
+        # Primary: check traefik router rule labels directly on managed containers.
+        # This is fast and works for all containers with explicit Host() rules.
+        for c in managed:
+            for key, value in c["labels"].items():
+                if key.startswith("traefik.http.routers.") and key.endswith(".rule"):
+                    if f"Host(`{host}`)" in value:
+                        return c
+
+        # Fallback: query Traefik API for containers using defaultRule or other discovery.
+        # Docker provider service names are "{slug}@docker"; the slug matches the compose
+        # service name (com.docker.compose.service) or an explicit traefik service label.
         try:
             resp = httpx.get(f"{TRAEFIK_API_URL}/api/rawdata", timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
-            routers = data.get("routers", {})
-
-            for router_name, router_data in routers.items():
+            for router_name, router_data in data.get("routers", {}).items():
                 rule = router_data.get("rule", "")
-                if f"Host(`{host}`)" in rule or f"Host:{host}" in rule:
-                    service_name = router_data.get("service")
-                    if not service_name:
-                        continue
+                if f"Host(`{host}`)" not in rule:
+                    continue
 
-                    services = data.get("services", {})
-                    service_data = services.get(service_name, {})
+                service_name = router_data.get("service", "")
+                if not service_name:
+                    continue
 
-                    provider = service_data.get("provider", "")
-                    if "@docker" in provider or "docker" in provider.lower():
-                        server_url = service_data.get("serverURL", "")
-                        if "://" in server_url:
-                            container_name = server_url.split("://")[1].split(":")[0].replace("/", "")
-                            return self.find_container_by_name(container_name)
+                slug = service_name.rsplit("@", 1)[0] if "@" in service_name else service_name
 
-            return None
+                for c in managed:
+                    labels = c["labels"]
+                    if c["name"] == slug or c["service_name"] == slug:
+                        return c
+                    if any(k.startswith(f"traefik.http.services.{slug}.") for k in labels):
+                        return c
+
         except Exception as e:
             print(f"Error querying Traefik API: {e}")
-            return None
+
+        return None
 
     def find_container_by_name(self, name: str) -> Optional[dict]:
         try:
@@ -134,8 +146,9 @@ class ContainerManager:
             print(f"Error stopping container: {e}")
             return False
 
-    def _wait_for_health(self, container):
-        while True:
+    def _wait_for_health(self, container, timeout: int = 60):
+        start = time.time()
+        while time.time() - start < timeout:
             container.reload()
             health = container.attrs.get("State", {}).get("Health", {})
             if not health:
@@ -143,9 +156,7 @@ class ContainerManager:
                     return
             else:
                 status = health.get("Status")
-                if status == "healthy":
-                    return
-                if status == "unhealthy":
+                if status in ("healthy", "unhealthy"):
                     return
             time.sleep(1)
 
@@ -183,7 +194,7 @@ async def check_inactivity():
                 last_time = last_request_time.get(name)
                 if last_time and (now - last_time) >= stop_delay:
                     if container["status"] == "running":
-                        manager.stop_container(name)
+                        await asyncio.to_thread(manager.stop_container, name)
                         await event_queue.put({
                             "type": "auto_stop",
                             "container": name,
@@ -194,7 +205,7 @@ async def check_inactivity():
                         if group:
                             for other in managed:
                                 if other["group"] == group and other["name"] != name and other["status"] == "running":
-                                    manager.stop_container(other["name"])
+                                    await asyncio.to_thread(manager.stop_container, other["name"])
                                     await event_queue.put({
                                         "type": "auto_stop",
                                         "container": other["name"],
@@ -289,9 +300,11 @@ async def wake(request: Request):
     last_request_time[name] = datetime.now()
 
     if container["status"] != "running":
-        success = manager.start_container(name)
+        # Run blocking start (which waits for health) in a thread pool to avoid
+        # blocking the asyncio event loop for the duration of the container startup.
+        success = await asyncio.to_thread(manager.start_container, name)
         if group:
-            start_group(group, name)
+            await asyncio.to_thread(start_group, group, name)
         if success:
             await event_queue.put({
                 "type": "wake",
