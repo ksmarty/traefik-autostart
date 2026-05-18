@@ -2,12 +2,6 @@ http:
   middlewares:
     autostart:
       plugin:
-        github.com/ksmarty/traefik-container-sleep:
+        autostart:
           timeout: 30
           url: http://controller:5000/wake
-
-experimental:
-  plugins:
-    github.com/ksmarty/traefik-container-sleep:
-      version: v1.0.0
-      url: https://github.com/ksmarty/traefik-container-sleep/releases/download/v1.0.0/plugin.tar.gz

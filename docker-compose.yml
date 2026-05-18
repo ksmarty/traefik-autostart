@@ -22,8 +22,8 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.file.directory=/etc/traefik/dynamic"
-      - "--pilot.token=dashboard"
-      - "--experimental.localPlugins=true"
+      - "--experimental.plugins.autostart.moduleName=github.com/ksmarty/traefik-container-sleep"
+      - "--experimental.plugins.autostart.version=v1.0.0"
       - "--entrypoints.web.address=:80"
       - "--log.level=INFO"
     ports:
