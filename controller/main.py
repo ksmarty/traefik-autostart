@@ -20,6 +20,9 @@ TRAEFIK_API_URL = os.getenv("TRAEFIK_API_URL", "http://traefik:8080")
 DOCKER_SOCKET = os.getenv("DOCKER_SOCKET", "/var/run/docker.sock")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "templates")
 
+print(f"Environment: TRAEFIK_API_URL={TRAEFIK_API_URL}, DOCKER_SOCKET={DOCKER_SOCKET}")
+print(f"Docker socket path: {DOCKER_SOCKET}")
+
 containers_state: dict[str, dict] = {}
 last_request_time: dict[str, datetime] = {}
 event_queue: asyncio.Queue = asyncio.Queue()
@@ -30,7 +33,17 @@ client: Optional[docker.DockerClient] = None
 def get_docker_client() -> docker.DockerClient:
     global client
     if client is None:
-        client = docker.DockerClient(base_url=f"unix://{DOCKER_SOCKET}")
+        socket_path = DOCKER_SOCKET.strip() if DOCKER_SOCKET else "/var/run/docker.sock"
+        if not socket_path:
+            socket_path = "/var/run/docker.sock"
+        print(f"Connecting to Docker socket: {socket_path}")
+        try:
+            client = docker.DockerClient(base_url=f"unix://{socket_path}")
+            client.ping()
+            print("Docker connection successful")
+        except Exception as e:
+            print(f"Docker connection failed: {e}")
+            raise
     return client
 
 
