@@ -2,6 +2,13 @@ middlewares:
   autostart:
     displayName: Auto Start Middleware
     summary: Automatically starts containers on request
+    testData:
+      http:
+        request:
+          host: test.local
+      configuration:
+        timeout: 30
+        url: http://controller:5000/wake
     fields:
       timeout:
         type: number
