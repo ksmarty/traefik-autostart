@@ -107,9 +107,8 @@
                         @change="toggleSelectAll()"
                         class="rounded border-gray-600 bg-gray-700 cursor-pointer">
                     </th>
-                    <th class="px-6 py-3">Container</th>
+                     <th class="px-6 py-3">Container</th>
                     <th class="px-6 py-3">Status</th>
-                    <th class="px-6 py-3">Health</th>
                     <th class="px-6 py-3">Stop Delay</th>
                     <th class="px-6 py-3">Last Request</th>
                     <th class="px-6 py-3 text-right">Actions</th>
@@ -138,40 +137,16 @@
                         </div>
                       </td>
 
-                      <!-- Status -->
+                      <!-- Status — combines Docker status + health into one badge.
+                           Uses inline :style for colours so twind never needs to
+                           generate CSS for dynamically bound class names (which it
+                           may miss, causing the wrong colour after SSE updates). -->
                       <td class="px-6 py-3.5">
                         <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold"
-                          :class="{
-                            'bg-green-900/60 text-green-300':  c.status === 'running',
-                            'bg-yellow-900/60 text-yellow-300': c.status === 'starting' || c.status === 'created',
-                            'bg-red-900/60 text-red-300':      c.status === 'exited' || c.status === 'stopped',
-                            'bg-gray-700 text-gray-300':       !['running','exited','stopped','starting','created'].includes(c.status)
-                          }">
-                          <span class="w-1.5 h-1.5 rounded-full"
-                            :class="{
-                              'bg-green-400':  c.status === 'running',
-                              'bg-yellow-400': c.status === 'starting' || c.status === 'created',
-                              'bg-red-400':    c.status === 'exited' || c.status === 'stopped',
-                              'bg-gray-400':   !['running','exited','stopped','starting','created'].includes(c.status)
-                            }"></span>
-                          <span x-text="c.status"></span>
+                          :style="statusBadgeStyle(c)">
+                          <span class="w-1.5 h-1.5 rounded-full" :style="dotStyle(c)"></span>
+                          <span x-text="displayStatus(c)"></span>
                         </span>
-                      </td>
-
-                      <!-- Health — hidden when container is not running -->
-                      <td class="px-6 py-3.5">
-                        <template x-if="c.status === 'running' && c.health && c.health !== c.status">
-                          <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-semibold"
-                            :class="{
-                              'bg-green-900/60 text-green-300':  c.health === 'healthy',
-                              'bg-yellow-900/60 text-yellow-300': c.health === 'unhealthy' || c.health === 'starting'
-                            }"
-                            x-text="c.health">
-                          </span>
-                        </template>
-                        <template x-if="c.status !== 'running' || !c.health || c.health === c.status">
-                          <span class="text-gray-600">—</span>
-                        </template>
                       </td>
 
                       <!-- Stop delay -->
@@ -307,6 +282,57 @@
         // Unique sorted list of group names across all managed containers.
         get groups() {
           return [...new Set(this.containers.map(c => c.group).filter(Boolean))].sort();
+        },
+
+        // ── Status badge helpers ──────────────────────────────────────────────
+        // All colours use inline :style (not :class) so twind never needs to
+        // generate CSS for these values dynamically — it can miss class names that
+        // only appear inside Alpine expressions, which causes the wrong colour
+        // after SSE-driven data updates.
+
+        // Colour palette (matched to Tailwind dark-theme equivalents):
+        //   green  — bg-green-900/60  text-green-300  dot green-400
+        //   yellow — bg-yellow-900/60 text-yellow-300 dot yellow-400
+        //   orange — bg-orange-900/60 text-orange-300 dot orange-400  (unhealthy)
+        //   red    — bg-red-900/60    text-red-300    dot red-400
+
+        _statusTier(c) {
+          const s = c.status, h = c.health;
+          if (s === 'running') {
+            if (!h || h === s || h === 'healthy') return 'green';
+            if (h === 'unhealthy')                return 'orange';
+            /* h === 'starting' */                return 'yellow';
+          }
+          if (s === 'starting' || s === 'created') return 'yellow';
+          return 'red';
+        },
+
+        statusBadgeStyle(c) {
+          const t = this._statusTier(c);
+          if (t === 'green')  return 'background:rgba(20,83,45,0.6);color:rgb(134,239,172)';
+          if (t === 'yellow') return 'background:rgba(113,63,18,0.6);color:rgb(252,211,77)';
+          if (t === 'orange') return 'background:rgba(124,45,18,0.6);color:rgb(253,186,116)';
+          /* red */           return 'background:rgba(127,29,29,0.6);color:rgb(252,165,165)';
+        },
+
+        dotStyle(c) {
+          const t = this._statusTier(c);
+          if (t === 'green')  return 'background:rgb(74,222,128)';
+          if (t === 'yellow') return 'background:rgb(250,204,21)';
+          if (t === 'orange') return 'background:rgb(251,146,60)';
+          /* red */           return 'background:rgb(248,113,113)';
+        },
+
+        // Returns a combined status string like Portainer:
+        //   running              → "running"
+        //   running + healthy    → "running"
+        //   running + unhealthy  → "running (unhealthy)"
+        //   running + starting   → "running (starting)"
+        //   anything else        → Docker status as-is
+        displayStatus(c) {
+          const s = c.status, h = c.health;
+          if (s === 'running' && h && h !== s && h !== 'healthy') return `running (${h})`;
+          return s;
         },
 
         isSelected(name) {

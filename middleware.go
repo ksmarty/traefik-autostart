@@ -50,9 +50,11 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 
 // wakeResult holds the parsed response from the controller's /wake endpoint.
 type wakeResult struct {
-	ready   bool
-	elapsed int
-	group   []groupMember
+	ready     bool
+	elapsed   int
+	group     []groupMember
+	container string // name of the container being woken
+	groupName string // autostart.group label value (empty for ungrouped containers)
 }
 
 // groupMember is a single container in a wake group.
@@ -63,8 +65,10 @@ type groupMember struct {
 
 // wakeRespBody is the JSON shape of a 202 response from /wake.
 type wakeRespBody struct {
-	Elapsed int           `json:"elapsed"`
-	Group   []groupMember `json:"group"`
+	Elapsed   int           `json:"elapsed"`
+	Group     []groupMember `json:"group"`
+	Container string        `json:"container"`
+	GroupName string        `json:"group_name"`
 }
 
 // WakeRequest is the payload sent to the controller's /wake endpoint.
@@ -101,7 +105,37 @@ func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	flusher, canFlush := rw.(http.Flusher)
 
-	fmt.Fprint(rw, strings.ReplaceAll(landingPageHTML, "{{HOST}}", host))
+	// Compute the heading and subtitle for the loading page.
+	//
+	// Prefer the container/group name over the raw host URL:
+	//   - Single container: h1 = container name, subtitle = "→ host"
+	//   - Group:            h1 = group name,     subtitle = "group start · → host"
+	//
+	// Fallback to host if the controller didn't return a name yet.
+	isGroup := len(result.group) > 1
+	h1 := host
+	switch {
+	case isGroup && result.groupName != "":
+		h1 = result.groupName
+	case result.container != "":
+		h1 = result.container
+	}
+
+	var pageTitle, subtitle string
+	if isGroup {
+		pageTitle = "Starting group: " + h1
+		subtitle = "Group start \u00b7 \u2192 " + host
+	} else {
+		pageTitle = "Starting " + h1
+		subtitle = "\u2192 " + host
+	}
+
+	page := landingPageHTML
+	page = strings.ReplaceAll(page, "{{PAGE_TITLE}}", pageTitle)
+	page = strings.ReplaceAll(page, "{{H1}}", h1)
+	page = strings.ReplaceAll(page, "{{SUBTITLE}}", subtitle)
+	page = strings.ReplaceAll(page, "{{HOST}}", host) // used by JS fallback poll
+	fmt.Fprint(rw, page)
 	if canFlush {
 		flusher.Flush()
 	}
@@ -182,7 +216,12 @@ func (a *AutoStart) callWake(ctx context.Context, host string) wakeResult {
 	// Parse 202 body — best-effort; ignore errors.
 	var rb wakeRespBody
 	json.NewDecoder(resp.Body).Decode(&rb) //nolint
-	return wakeResult{elapsed: rb.Elapsed, group: rb.Group}
+	return wakeResult{
+		elapsed:   rb.Elapsed,
+		group:     rb.Group,
+		container: rb.Container,
+		groupName: rb.GroupName,
+	}
 }
 
 // push injects a JavaScript expression into the open streaming HTML response.
@@ -213,7 +252,7 @@ const landingPageHTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Starting {{HOST}}</title>
+  <title>{{PAGE_TITLE}}</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -243,9 +282,10 @@ const landingPageHTML = `<!DOCTYPE html>
       margin: 0 auto 1.5rem;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    h1   { font-size: 1.1rem; font-weight: 600; color: #111827; margin-bottom: 0.75rem; }
-    #msg { font-size: 0.9rem; color: #6b7280; min-height: 1.4em; }
-    #sec { font-size: 0.75rem; color: #9ca3af; margin-top: 0.4rem; min-height: 1em; }
+    h1       { font-size: 1.1rem; font-weight: 600; color: #111827; margin-bottom: 0.2rem; }
+    .subtitle{ font-size: 0.8rem; color: #9ca3af; margin-bottom: 0.9rem; }
+    #msg     { font-size: 0.9rem; color: #6b7280; min-height: 1.4em; }
+    #sec     { font-size: 0.75rem; color: #9ca3af; margin-top: 0.4rem; min-height: 1em; }
     #grp {
       display: none;
       margin-top: 1rem;
@@ -267,7 +307,8 @@ const landingPageHTML = `<!DOCTYPE html>
 <body>
   <div class="card">
     <div class="spinner"></div>
-    <h1>{{HOST}}</h1>
+    <h1>{{H1}}</h1>
+    <p class="subtitle">{{SUBTITLE}}</p>
     <p id="msg">Starting&hellip;</p>
     <p id="sec"></p>
     <div id="grp"></div>
@@ -295,7 +336,7 @@ const landingPageHTML = `<!DOCTYPE html>
     // 503 and is aborted immediately — no visible effect. When the container is ready
     // (non-503) the page reloads seamlessly.
     (function() {
-      var t = setInterval(function() {
+      setInterval(function() {
         var c = new AbortController();
         fetch(location.href, { credentials: 'include', signal: c.signal })
           .then(function(r) { c.abort(); if (r.status !== 503) { location.reload(); } })

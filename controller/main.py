@@ -542,6 +542,7 @@ async def wake(request: Request):
     return JSONResponse(status_code=202, content={
         "status": "starting",
         "container": name,
+        "group_name": group,
         "elapsed": elapsed,
         "group": group_status,
     })
