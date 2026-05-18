@@ -42,10 +42,8 @@ services:
       - "5000:5000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./controller/logs:/app/logs
     environment:
       - TRAEFIK_API_URL=http://traefik:8080
-      - DOCKER_SOCKET=/var/run/docker.sock
     networks:
       - web
     depends_on:
