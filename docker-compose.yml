@@ -22,9 +22,7 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.file.directory=/etc/traefik/dynamic"
-      - "--experimental.plugins.autostart.moduleName=github.com/ksmarty/traefik-container-sleep"
-      - "--experimental.plugins.autostart.version=v0.0.2"
-      - "--experimental.plugins.autostart.url=https://github.com/ksmarty/traefik-container-sleep/releases/download/v0.0.2/plugin.tar.gz"
+      - "--configFile=/etc/traefik/static.yaml"
       - "--entrypoints.web.address=:80"
       - "--log.level=INFO"
     ports:
@@ -33,6 +31,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./traefik-config:/etc/traefik/dynamic
+      - ./traefik-config/static.yaml:/etc/traefik/static.yaml:ro
     networks:
       - web
 
