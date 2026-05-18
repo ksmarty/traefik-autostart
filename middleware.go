@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultTimeout = 30 // seconds
+	defaultTimeout = 300 // seconds — generous default to handle slow-starting containers
 	defaultURL     = "http://controller:5000/wake"
 )
 
@@ -48,6 +48,30 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}, nil
 }
 
+// wakeResult holds the parsed response from the controller's /wake endpoint.
+type wakeResult struct {
+	ready   bool
+	elapsed int
+	group   []groupMember
+}
+
+// groupMember is a single container in a wake group.
+type groupMember struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+// wakeRespBody is the JSON shape of a 202 response from /wake.
+type wakeRespBody struct {
+	Elapsed int           `json:"elapsed"`
+	Group   []groupMember `json:"group"`
+}
+
+// WakeRequest is the payload sent to the controller's /wake endpoint.
+type WakeRequest struct {
+	Host string `json:"host"`
+}
+
 func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	host := req.Host
 	if idx := strings.Index(host, ":"); idx != -1 {
@@ -55,7 +79,8 @@ func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	// Fast path: container is already running — forward immediately.
-	if a.callWake(req.Context(), host) {
+	result := a.callWake(req.Context(), host)
+	if result.ready {
 		rw.Header().Set("X-Wake-Status", "ready")
 		a.next.ServeHTTP(rw, req)
 		return
@@ -63,25 +88,29 @@ func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	// Slow path: stream the loading page over the open HTTP connection.
 	//
-	// Instead of serving a static page with JS polling (which causes the browser to
-	// briefly show a blank page on each reload), we keep this HTTP response open and
-	// push <script> tags into the live page as status changes. The CSS animation never
-	// resets because the page is never reloaded — only the final window.location.reload()
-	// triggers a navigation once the container is confirmed ready.
+	// The page is sent immediately so the user sees the spinner at once. The middleware
+	// then polls the controller every second and pushes <script> chunks into the live
+	// document. The CSS animation never resets because the page is never reloaded —
+	// window.location.reload() is only injected once the container is confirmed ready.
+	//
+	// If the timeout is reached (container taking too long), a final script auto-reloads
+	// the page after a short delay, which starts a fresh streaming connection.
 	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 	rw.Header().Set("X-Accel-Buffering", "no") // disable nginx/proxy buffering
 	rw.WriteHeader(http.StatusServiceUnavailable)
 
 	flusher, canFlush := rw.(http.Flusher)
 
-	// Write the opening HTML — body is intentionally left unclosed so we can
-	// append <script> chunks to the live document stream below.
 	fmt.Fprint(rw, strings.ReplaceAll(landingPageHTML, "{{HOST}}", host))
 	if canFlush {
 		flusher.Flush()
 	}
 
-	start := time.Now()
+	// Use the elapsed value from the server so that a page refresh picks up exactly
+	// where the startup left off rather than resetting the phase text to "0s".
+	serverElapsed := result.elapsed
+	localStart := time.Now()
+
 	deadline := time.NewTimer(a.timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(1 * time.Second)
@@ -94,22 +123,25 @@ func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			return
 
 		case <-deadline.C:
+			// Timeout reached. Auto-reload so the browser gets a fresh streaming
+			// connection — the container may still be starting up.
+			elapsed := serverElapsed + int(time.Since(localStart).Seconds())
 			push(rw, flusher, canFlush, fmt.Sprintf(
-				`u('Container is taking longer than expected\u2026',%d)`,
-				int(a.timeout.Seconds()),
+				`u('Still starting\u2026 reconnecting in 3s',%d,null)`, elapsed,
 			))
+			push(rw, flusher, canFlush, `setTimeout(function(){window.location.reload()},3000)`)
 			return
 
 		case <-tick.C:
-			elapsed := int(time.Since(start).Seconds())
+			elapsed := serverElapsed + int(time.Since(localStart).Seconds())
 
-			if a.callWake(req.Context(), host) {
-				// Container is ready — trigger a clean browser navigation to the real page.
+			result = a.callWake(req.Context(), host)
+			if result.ready {
 				push(rw, flusher, canFlush, "window.location.reload()")
 				return
 			}
 
-			// Inject a status update reflecting the current startup phase.
+			// Phase-based status message derived from total elapsed time.
 			var msg string
 			switch {
 			case elapsed < 5:
@@ -121,34 +153,43 @@ func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			default:
 				msg = `Almost ready\u2026`
 			}
-			push(rw, flusher, canFlush, fmt.Sprintf("u('%s',%d)", msg, elapsed))
+			push(rw, flusher, canFlush, fmt.Sprintf("u('%s',%d,%s)", msg, elapsed, groupToJS(result.group)))
 		}
 	}
 }
 
-// callWake POSTs to the controller wake endpoint. Returns true only when the
-// controller responds 200 (container is running and Traefik backend is registered).
-func (a *AutoStart) callWake(ctx context.Context, host string) bool {
+// callWake POSTs to the controller wake endpoint. On 200 it returns ready=true.
+// On 202 it parses the body for elapsed seconds and group member statuses so the
+// loading page can show accurate phase text and per-container progress.
+func (a *AutoStart) callWake(ctx context.Context, host string) wakeResult {
 	body, err := json.Marshal(WakeRequest{Host: host})
 	if err != nil {
-		return false
+		return wakeResult{}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, a.url, strings.NewReader(string(body)))
 	if err != nil {
-		return false
+		return wakeResult{}
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {
-		return false
+		return wakeResult{}
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+
+	if resp.StatusCode == http.StatusOK {
+		return wakeResult{ready: true}
+	}
+
+	// Parse 202 body — best-effort; ignore errors.
+	var rb wakeRespBody
+	json.NewDecoder(resp.Body).Decode(&rb) //nolint
+	return wakeResult{elapsed: rb.Elapsed, group: rb.Group}
 }
 
 // push injects a JavaScript expression into the open streaming HTML response.
@@ -159,14 +200,21 @@ func push(rw http.ResponseWriter, flusher http.Flusher, canFlush bool, js string
 	}
 }
 
-// WakeRequest is the payload sent to the controller's /wake endpoint.
-type WakeRequest struct {
-	Host string `json:"host"`
+// groupToJS converts a group slice to a JSON array literal safe for inline JS.
+func groupToJS(group []groupMember) string {
+	if len(group) == 0 {
+		return "null"
+	}
+	b, err := json.Marshal(group)
+	if err != nil {
+		return "null"
+	}
+	return string(b)
 }
 
 // landingPageHTML is the initial chunk streamed to the browser. The document is
-// intentionally left unclosed — subsequent push() calls extend the live page with
-// <script> tags that update status text or trigger a reload when ready.
+// intentionally left unclosed — push() calls extend the live page with <script>
+// chunks that update status text or trigger a reload when ready.
 const landingPageHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -190,6 +238,7 @@ const landingPageHTML = `<!DOCTYPE html>
       border-radius: 12px;
       box-shadow: 0 4px 24px rgba(0,0,0,0.08);
       min-width: 280px;
+      max-width: 420px;
     }
     .spinner {
       width: 44px;
@@ -204,6 +253,22 @@ const landingPageHTML = `<!DOCTYPE html>
     h1   { font-size: 1.1rem; font-weight: 600; color: #111827; margin-bottom: 0.75rem; }
     #msg { font-size: 0.9rem; color: #6b7280; min-height: 1.4em; }
     #sec { font-size: 0.75rem; color: #9ca3af; margin-top: 0.4rem; min-height: 1em; }
+    #grp {
+      display: none;
+      margin-top: 1rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid #f3f4f6;
+    }
+    .gi {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.2rem 0;
+      font-size: 0.8rem;
+    }
+    .gn { color: #9ca3af; }
+    .gr { color: #22c55e; }
+    .gw { color: #f59e0b; }
   </style>
 </head>
 <body>
@@ -212,10 +277,24 @@ const landingPageHTML = `<!DOCTYPE html>
     <h1>{{HOST}}</h1>
     <p id="msg">Starting&hellip;</p>
     <p id="sec"></p>
+    <div id="grp"></div>
   </div>
   <script>
-    function u(msg, secs) {
+    function u(msg, secs, group) {
       document.getElementById('msg').textContent = msg;
       document.getElementById('sec').textContent = secs + 's elapsed';
+      var g = document.getElementById('grp');
+      if (group && group.length > 1) {
+        g.style.display = 'block';
+        g.innerHTML = group.map(function(c) {
+          var ready = c.status === 'ready' || c.status === 'running';
+          return '<div class="gi"><span class="gn">' + c.name + '</span>' +
+            '<span class="' + (ready ? 'gr' : 'gw') + '">' +
+            (ready ? '&#10003; ready' : '&#9679; ' + c.status) +
+            '</span></div>';
+        }).join('');
+      } else {
+        g.style.display = 'none';
+      }
     }
   </script>`

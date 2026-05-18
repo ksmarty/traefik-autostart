@@ -3,7 +3,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -26,6 +26,7 @@ print(f"Docker socket path: {DOCKER_SOCKET}")
 containers_state: dict[str, dict] = {}
 last_request_time: dict[str, datetime] = {}
 starting_containers: set[str] = set()
+container_start_times: dict[str, datetime] = {}
 event_queue: asyncio.Queue = asyncio.Queue()
 
 client: Optional[docker.DockerClient] = None
@@ -112,7 +113,9 @@ class ContainerManager:
         try:
             all_containers = self.docker.containers.list(all=True)
             for c in all_containers:
-                if c.labels.get("autostart.enable") == "true":
+                # A container is managed if it explicitly opts in OR if it belongs to a group.
+                # Having autostart.group on a container is sufficient — autostart.enable is optional.
+                if c.labels.get("autostart.enable") == "true" or c.labels.get("autostart.group"):
                     containers.append({
                         "id": c.id,
                         "name": c.name,
@@ -238,7 +241,7 @@ async def check_inactivity():
     while True:
         try:
             managed = manager.find_managed_containers()
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
 
             for container in managed:
                 name = container["name"]
@@ -290,8 +293,16 @@ def parse_duration(s: str) -> float:
 
 
 async def event_generator():
+    # Send an immediate ping so the browser's EventSource fires onmessage quickly,
+    # allowing the connected indicator to update without waiting for a real event.
+    yield json.dumps({"type": "ping"})
     while True:
-        event = await event_queue.get()
+        try:
+            event = await asyncio.wait_for(event_queue.get(), timeout=25)
+        except asyncio.TimeoutError:
+            # Keepalive: prevents proxies from closing idle SSE connections
+            yield json.dumps({"type": "ping"})
+            continue
         yield json.dumps(event)
 
 
@@ -359,14 +370,15 @@ async def wake(request: Request):
     labels = container["labels"]
     group = labels.get("autostart.group", "")
 
-    last_request_time[name] = datetime.now()
+    now = datetime.now(timezone.utc)
+    last_request_time[name] = now
     containers_state[name] = {
         "status": manager.get_container_status(name),
-        "last_request": datetime.now().isoformat(),
+        "last_request": now.isoformat(),
         "labels": labels,
     }
 
-    # Container is running and Traefik backend is ready — forward the request
+    # Container is running and Traefik backend is ready — forward the request.
     if container["status"] == "running" and name not in starting_containers:
         await event_queue.put({
             "type": "request",
@@ -375,12 +387,13 @@ async def wake(request: Request):
         })
         return {"status": "ok", "container": name}
 
-    # Container needs to start — fire off a background task and return 202 immediately.
-    # The middleware treats any non-200 as "not ready" and shows the loading page.
-    # Subsequent /wake polls will return 202 until start_container_task completes and
-    # removes the name from starting_containers.
+    # Container needs to start — fire a background task and return 202 immediately.
+    # Multiple simultaneous requests (e.g. page refresh) are safe: only the first call
+    # adds the name to starting_containers and creates the task; subsequent calls just
+    # recalculate elapsed/group to return up-to-date info in the 202 body.
     if name not in starting_containers:
         starting_containers.add(name)
+        container_start_times[name] = now
         asyncio.create_task(start_container_task(name, group, host))
         await event_queue.put({
             "type": "starting",
@@ -388,7 +401,30 @@ async def wake(request: Request):
             "message": f"Starting container for host: {host}",
         })
 
-    return JSONResponse(status_code=202, content={"status": "starting", "container": name})
+    # Build per-container group status for the loading page.
+    group_status = []
+    if group:
+        for c in manager.find_managed_containers():
+            if c["labels"].get("autostart.group") == group:
+                if c["status"] == "running" and c["name"] not in starting_containers:
+                    st = "ready"
+                elif c["name"] in starting_containers:
+                    st = "starting"
+                else:
+                    st = c["status"]
+                group_status.append({"name": c["name"], "status": st})
+
+    # Tell the middleware how long this container has been starting so that a page
+    # refresh shows the right phase message instead of resetting to "Starting (0s)".
+    start_time = container_start_times.get(name, now)
+    elapsed = int((now - start_time).total_seconds())
+
+    return JSONResponse(status_code=202, content={
+        "status": "starting",
+        "container": name,
+        "elapsed": elapsed,
+        "group": group_status,
+    })
 
 
 @app.get("/containers")
@@ -410,6 +446,7 @@ async def list_containers():
             "last_request": last_req.isoformat() if last_req else None,
             "service": c["service_name"],
             "project": c["project"],
+            "group": c["group"],
             "labels": c["labels"],
         })
 
@@ -433,6 +470,7 @@ async def get_container(name: str):
         "last_request": last_req.isoformat() if last_req else None,
         "service": labels.get("com.docker.compose.service", container["name"]),
         "project": labels.get("com.docker.compose.project", ""),
+        "group": labels.get("autostart.group", ""),
         "labels": labels,
     }
 
@@ -441,7 +479,7 @@ async def get_container(name: str):
 async def start_container(name: str):
     success = await asyncio.to_thread(manager.start_container, name)
     if success:
-        last_request_time[name] = datetime.now()
+        last_request_time[name] = datetime.now(timezone.utc)
         await event_queue.put({
             "type": "manual_start",
             "container": name,
@@ -453,7 +491,7 @@ async def start_container(name: str):
 
 @app.post("/containers/{name}/stop")
 async def stop_container(name: str):
-    success = manager.stop_container(name)
+    success = await asyncio.to_thread(manager.stop_container, name)
     if success:
         await event_queue.put({
             "type": "manual_stop",

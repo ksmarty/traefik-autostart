@@ -10,7 +10,12 @@
     [x-cloak] { display: none !important; }
   </style>
 </head>
-<body class="bg-gray-900 text-gray-100 min-h-screen" x-data="app()" x-init="init()" x-cloak>
+<!--
+  Alpine auto-calls init() when it finds a method with that name in x-data.
+  Do NOT add x-init="init()" — it would cause a double-initialisation, firing
+  two fetchAll() calls and opening two SSE connections.
+-->
+<body class="bg-gray-900 text-gray-100 min-h-screen" x-data="app()" x-cloak>
 
   <!-- Nav -->
   <nav class="bg-gray-800 border-b border-gray-700 px-6 h-14 flex items-center justify-between">
@@ -23,7 +28,8 @@
     </div>
     <div class="flex items-center gap-4 text-sm text-gray-400">
       <span>
-        SSE:&nbsp;<span :class="connected ? 'text-green-400' : 'text-red-400'" x-text="connected ? 'connected' : 'disconnected'"></span>
+        SSE:&nbsp;<span :class="connected ? 'text-green-400' : 'text-red-400'"
+          x-text="connected ? 'connected' : 'disconnected'"></span>
       </span>
     </div>
   </nav>
@@ -49,13 +55,16 @@
         <div class="lg:col-span-2 bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
           <div class="px-6 py-4 border-b border-gray-700 flex items-center justify-between">
             <h2 class="font-semibold">Managed Containers</h2>
-            <span class="text-sm text-gray-400" x-text="containers.length + ' container' + (containers.length !== 1 ? 's' : '')"></span>
+            <span class="text-sm text-gray-400"
+              x-text="containers.length + ' container' + (containers.length !== 1 ? 's' : '')"></span>
           </div>
 
           <template x-if="containers.length === 0">
             <div class="px-6 py-10 text-center text-gray-500 text-sm">
               No managed containers found.<br>
-              Add <code class="bg-gray-700 px-1.5 py-0.5 rounded text-gray-300 text-xs">autostart.enable=true</code> to your container labels.
+              Add <code class="bg-gray-700 px-1.5 py-0.5 rounded text-gray-300 text-xs">autostart.enable=true</code>
+              or <code class="bg-gray-700 px-1.5 py-0.5 rounded text-gray-300 text-xs">autostart.group=&lt;name&gt;</code>
+              to your container labels.
             </div>
           </template>
 
@@ -76,11 +85,17 @@
                   <template x-for="c in containers" :key="c.name">
                     <tr class="hover:bg-gray-750 transition-colors">
 
-                      <!-- Name -->
+                      <!-- Name + service + group -->
                       <td class="px-6 py-3.5">
                         <div class="font-medium text-gray-200" x-text="c.name"></div>
-                        <div class="text-xs text-gray-500 mt-0.5"
-                          x-text="c.service + (c.project ? ' · ' + c.project : '')"></div>
+                        <div class="text-xs text-gray-500 mt-0.5 space-x-2">
+                          <span x-show="c.service || c.project"
+                            x-text="c.service + (c.project ? ' · ' + c.project : '')"></span>
+                          <!-- Group badge — only shown when the container belongs to a group -->
+                          <span x-show="c.group"
+                            class="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300"
+                            x-text="'group: ' + c.group"></span>
+                        </div>
                       </td>
 
                       <!-- Status -->
@@ -103,19 +118,18 @@
                         </span>
                       </td>
 
-                      <!-- Health -->
+                      <!-- Health — hidden when container is not running (health is meaningless when stopped) -->
                       <td class="px-6 py-3.5">
-                        <template x-if="c.health && c.health !== c.status">
+                        <template x-if="c.status === 'running' && c.health && c.health !== c.status">
                           <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-semibold"
                             :class="{
                               'bg-green-900/60 text-green-300':  c.health === 'healthy',
-                              'bg-yellow-900/60 text-yellow-300': c.health === 'starting' || c.health === 'unhealthy',
-                              'bg-blue-900/60 text-blue-300':    c.health === 'checking'
+                              'bg-yellow-900/60 text-yellow-300': c.health === 'unhealthy' || c.health === 'starting'
                             }"
                             x-text="c.health">
                           </span>
                         </template>
-                        <template x-if="!c.health || c.health === c.status">
+                        <template x-if="c.status !== 'running' || !c.health || c.health === c.status">
                           <span class="text-gray-600">—</span>
                         </template>
                       </td>
@@ -123,7 +137,7 @@
                       <!-- Stop delay -->
                       <td class="px-6 py-3.5 text-gray-400" x-text="c.stop_delay"></td>
 
-                      <!-- Last request -->
+                      <!-- Last request — relative time, never negative -->
                       <td class="px-6 py-3.5 text-gray-400">
                         <template x-if="c.last_request">
                           <span x-text="relativeTime(c.last_request)"></span>
@@ -176,7 +190,7 @@
               <h2 class="font-semibold text-sm">Event Log</h2>
               <span class="text-xs text-gray-500" x-text="events.length + ' events'"></span>
             </div>
-            <div class="divide-y divide-gray-700/50 max-h-96 overflow-y-auto" id="event-log">
+            <div class="divide-y divide-gray-700/50 max-h-96 overflow-y-auto">
               <template x-if="events.length === 0">
                 <div class="px-5 py-6 text-center text-gray-600 text-sm">No events yet</div>
               </template>
@@ -217,28 +231,29 @@
         get runningCount() { return this.containers.filter(c => c.status === 'running').length; },
         get stoppedCount() { return this.containers.filter(c => c.status !== 'running').length; },
 
+        // Alpine calls init() automatically — do NOT add x-init="init()" to the element.
         async init() {
           await this.fetchAll();
           this.connectSSE();
         },
 
-        // Initial full load — only called once on page load.
+        // Full container list — called once on load.
         async fetchAll() {
           this.loading = true;
           try {
             const res = await fetch('/containers');
             if (res.ok) {
               this.containers = await res.json();
-              this.connected  = true;
             }
           } catch (e) {
-            console.error('Failed to fetch containers:', e);
+            console.error('fetchAll failed:', e);
           } finally {
             this.loading = false;
           }
         },
 
-        // Targeted single-container refresh — called on state-changing SSE events.
+        // Targeted single-container fetch — triggered by state-changing SSE events.
+        // Much cheaper than re-fetching the full list.
         async fetchOne(name) {
           try {
             const res = await fetch(`/containers/${encodeURIComponent(name)}`);
@@ -246,13 +261,12 @@
             const updated = await res.json();
             const idx = this.containers.findIndex(c => c.name === name);
             if (idx >= 0) {
-              // Splice for Alpine reactivity
-              this.containers.splice(idx, 1, updated);
+              this.containers.splice(idx, 1, updated); // splice triggers Alpine reactivity
             } else {
               this.containers.push(updated);
             }
           } catch (e) {
-            console.error('Failed to fetch container:', name, e);
+            console.error('fetchOne failed:', name, e);
           }
         },
 
@@ -260,18 +274,23 @@
           if (this._sse) this._sse.close();
           this._sse = new EventSource('/events');
 
-          this._sse.onopen = () => { this.connected = true; };
-
           this._sse.onmessage = (e) => {
             let data;
             try { data = JSON.parse(e.data); } catch { return; }
+
+            // The server sends periodic 'ping' keepalives — use the first one to confirm
+            // the SSE connection is alive, then ignore subsequent pings.
+            if (data.type === 'ping') {
+              this.connected = true;
+              return;
+            }
 
             // Prepend to event log, cap at 100 entries
             this.events.unshift({ ...data, timestamp: new Date().toISOString() });
             if (this.events.length > 100) this.events.length = 100;
 
-            // Only hit the API for events that change container state.
-            // 'request' fires on every proxied request and carries no state change.
+            // Only hit the API for events that actually change container state.
+            // 'request' fires on every proxied request — no state change, skip it.
             const stateEvents = ['starting', 'ready', 'auto_stop', 'manual_start', 'manual_stop', 'error'];
             if (data.container && stateEvents.includes(data.type)) {
               this.fetchOne(data.container);
@@ -293,9 +312,12 @@
           await fetch(`/containers/${encodeURIComponent(name)}/stop`, { method: 'POST' });
         },
 
+        // Returns a human-readable relative time string.
+        // Clamps to "just now" for future timestamps (e.g. clock skew).
         relativeTime(iso) {
           if (!iso) return '';
-          const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
+          const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+          if (diff < 5)    return 'just now';
           if (diff < 60)   return diff + 's ago';
           if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
           return Math.floor(diff / 3600) + 'h ago';
