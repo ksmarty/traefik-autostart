@@ -83,14 +83,20 @@ class ContainerManager:
                 service_name = router_data.get("service", "")
                 print(f"[DEBUG]   Router {router_name} matches, service={service_name}")
 
-                slug = service_name.rsplit("@", 1)[0] if "@" in service_name else service_name
+                service_slug = service_name.rsplit("@", 1)[0] if "@" in service_name else service_name
+                router_slug = router_name.rsplit("@", 1)[0] if "@" in router_name else router_name
+                print(f"[DEBUG]   service_slug={service_slug}, router_slug={router_slug}")
 
                 for c in managed:
                     labels = c["labels"]
-                    if c["name"] == slug or c["service_name"] == slug:
-                        print(f"[DEBUG]   Found container by slug: {c['name']}")
+                    # Match by service slug, router name slug, container name, or compose service name.
+                    # The router slug is the most reliable: Traefik names Docker routers after the
+                    # container/service (e.g. "pdf@docker" → slug "pdf" matches container "pdf")
+                    # even when a custom service name like "pdf-misc" is used.
+                    if c["name"] in (service_slug, router_slug) or c["service_name"] in (service_slug, router_slug):
+                        print(f"[DEBUG]   Found container by name/slug: {c['name']}")
                         return c
-                    if any(k.startswith(f"traefik.http.services.{slug}.") for k in labels):
+                    if any(k.startswith(f"traefik.http.services.{service_slug}.") for k in labels):
                         print(f"[DEBUG]   Found container by service label: {c['name']}")
                         return c
 
