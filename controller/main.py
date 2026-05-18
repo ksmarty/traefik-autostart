@@ -330,16 +330,14 @@ async def periodic_container_sync():
 async def start_container_task(name: str, group: str, host: str):
     """Start the targeted container and all co-group members concurrently.
 
-    All containers in the group are kicked off at the same time via asyncio.gather
-    so there is no sequential delay between members. Each manager.start_container
-    call blocks until that container is healthy; the slowest member determines the
-    total startup time.
+    Non-targeted group members are released from starting_containers and broadcast
+    as ready as soon as Docker reports them individually healthy — the webui immediately
+    shows each one as running without waiting for the rest of the group.
 
-    Only after every concurrent start returns AND Traefik has registered the
-    targeted backend is the whole group considered ready. The 'ready' broadcast
-    is sent for every member so the webui updates all rows at once.
+    The targeted container stays in starting_containers until BOTH Docker reports it
+    healthy AND Traefik has registered its backend. This is what keeps /wake returning
+    202 (and the progress page open) until the redirect is actually safe.
     """
-    # Collect all containers to start: targeted + non-running group members.
     to_start: list[str] = []
     try:
         if group:
@@ -350,28 +348,46 @@ async def start_container_task(name: str, group: str, host: str):
         else:
             to_start = [name]
 
-        # Start all concurrently. manager.start_container is a no-op for already-running
-        # containers, so it is safe to include every group member unconditionally.
+        async def _start_one(n: str) -> bool:
+            """Start one container. For group members that are not the targeted container,
+            remove from starting_containers and broadcast ready as soon as this container
+            is healthy — independent of the rest of the group."""
+            result = await asyncio.to_thread(manager.start_container, n)
+            if n != name:
+                # Non-targeted group member: release immediately so the webui and sync
+                # events show it as running while the targeted container waits for Traefik.
+                starting_containers.discard(n)
+                state = await asyncio.to_thread(_fetch_container_data, n)
+                event_type = "ready" if result else "error"
+                msg = (f"Container started as part of group '{group}'"
+                       if result else f"Failed to start container in group '{group}'")
+                await broadcast({"type": event_type, "container": n, "message": msg, "state": state})
+            return result
+
         results = await asyncio.gather(
-            *[asyncio.to_thread(manager.start_container, n) for n in to_start],
+            *[_start_one(n) for n in to_start],
             return_exceptions=True,
         )
 
-        # The targeted container must succeed; group member failures are logged but
-        # don't block the redirect.
         target_idx = to_start.index(name)
-        target_ok = results[target_idx] is True and not isinstance(results[target_idx], Exception)
+        target_result = results[target_idx]
+        target_ok = not isinstance(target_result, Exception) and target_result is True
 
         if target_ok:
+            # Now wait for Traefik to register the targeted backend — this gates /wake 200.
             await wait_for_traefik_backend(host)
-            print(f"Group ready: {to_start} for host {host}")
-            for n, result in zip(to_start, results):
-                state = await asyncio.to_thread(_fetch_container_data, n)
-                msg = (f"Container started for host: {host}" if n == name
-                       else f"Container started as part of group '{group}'")
-                await broadcast({"type": "ready", "container": n, "message": msg, "state": state})
+            print(f"Container {name} ready for host {host}")
+            starting_containers.discard(name)
+            state = await asyncio.to_thread(_fetch_container_data, name)
+            await broadcast({
+                "type": "ready",
+                "container": name,
+                "message": f"Container started for host: {host}",
+                "state": state,
+            })
         else:
             print(f"Failed to start targeted container {name}")
+            starting_containers.discard(name)
             state = await asyncio.to_thread(_fetch_container_data, name)
             await broadcast({
                 "type": "error",
@@ -381,6 +397,7 @@ async def start_container_task(name: str, group: str, host: str):
             })
     except Exception as e:
         print(f"start_container_task error: {e}")
+        starting_containers.discard(name)
         state = await asyncio.to_thread(_fetch_container_data, name)
         await broadcast({
             "type": "error",
@@ -389,10 +406,10 @@ async def start_container_task(name: str, group: str, host: str):
             "state": state,
         })
     finally:
-        # Remove every group member from starting_containers, not just the targeted one.
+        # Safety net: ensure nothing stays stuck in starting_containers.
         for n in to_start:
             starting_containers.discard(n)
-        starting_containers.discard(name)  # safety: handle empty to_start
+        starting_containers.discard(name)
 
 
 async def check_inactivity():
