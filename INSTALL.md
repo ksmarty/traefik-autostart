@@ -1,33 +1,32 @@
 # Installation
 
-## Clone the repository
+## 1. Add traefik-plugin topic to your GitHub repo
 
-```bash
-git clone https://github.com/ksmarty/traefik-container-sleep.git
-cd traefik-container-sleep
+Go to https://github.com/ksmarty/traefik-container-sleep -> Settings -> General -> Topics and add `traefik-plugin`
+
+## 2. Configure Traefik Static Config
+
+Add to your static configuration (TOML):
+
+```toml
+[experimental.plugins.autostart]
+moduleName = "github.com/ksmarty/traefik-container-sleep"
+version = "v0.0.2"
 ```
 
-## Configure Traefik
-
-Add to your static config or command args:
+Or YAML:
 
 ```yaml
 experimental:
-  localPlugins:
+  plugins:
     autostart:
       moduleName: github.com/ksmarty/traefik-container-sleep
+      version: v0.0.2
 ```
 
-Mount the plugin directory:
+## 3. Configure Middleware
 
-```yaml
-volumes:
-  - ./traefik-plugin:/plugins-local
-environment:
-  - TRAEFIK_PLUGIN_LOCAL=/plugins-local
-```
-
-Then add the middleware to your dynamic config:
+Add to your dynamic configuration:
 
 ```yaml
 http:
@@ -39,7 +38,9 @@ http:
           url: http://controller:5000/wake
 ```
 
-Finally, add the controller service to your docker-compose:
+## 4. Add Controller
+
+Add the controller service to your docker-compose:
 
 ```yaml
 controller:
@@ -50,4 +51,4 @@ controller:
     - TRAEFIK_API_URL=http://traefik:8080
 ```
 
-Restart Traefik and the controller.
+Restart Traefik.
