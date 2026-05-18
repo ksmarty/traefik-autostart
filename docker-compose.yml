@@ -53,8 +53,8 @@ services:
     image: nginx:alpine
     container_name: sleepy-nginx
     labels:
+      - "autostart.enable=true"
       - "traefik.enable=true"
-      - "traefik.docker.allownonrunning=true"
       - "traefik.http.routers.nginx.rule=Host(`sleepy.local`)"
       - "traefik.http.routers.nginx.entrypoints=web"
       - "traefik.http.routers.nginx.middlewares=autostart@file"
@@ -74,8 +74,9 @@ services:
       retries: 3
       start_period: 5s
     labels:
+      - "autostart.enable=true"
+      - "autostart.group=api"
       - "traefik.enable=true"
-      - "traefik.docker.allownonrunning=true"
       - "traefik.http.routers.api.rule=Host(`api.sleepy.local`)"
       - "traefik.http.routers.api.entrypoints=web"
       - "traefik.http.routers.api.middlewares=autostart@file"

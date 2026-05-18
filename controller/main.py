@@ -98,7 +98,7 @@ class ContainerManager:
         try:
             all_containers = self.docker.containers.list(all=True)
             for c in all_containers:
-                if c.labels.get("traefik.docker.allownonrunning") == "true":
+                if c.labels.get("autostart.enable") == "true":
                     containers.append({
                         "id": c.id,
                         "name": c.name,
@@ -107,6 +107,7 @@ class ContainerManager:
                         "short_id": c.short_id,
                         "service_name": c.labels.get("com.docker.compose.service", c.name),
                         "project": c.labels.get("com.docker.compose.project", ""),
+                        "group": c.labels.get("autostart.group", ""),
                     })
         except Exception as e:
             print(f"Error listing containers: {e}")
@@ -133,9 +134,8 @@ class ContainerManager:
             print(f"Error stopping container: {e}")
             return False
 
-    def _wait_for_health(self, container, timeout: int = 60):
-        start = time.time()
-        while time.time() - start < timeout:
+    def _wait_for_health(self, container):
+        while True:
             container.reload()
             health = container.attrs.get("State", {}).get("Health", {})
             if not health:
@@ -144,6 +144,8 @@ class ContainerManager:
             else:
                 status = health.get("Status")
                 if status == "healthy":
+                    return
+                if status == "unhealthy":
                     return
             time.sleep(1)
 
@@ -170,6 +172,7 @@ async def check_inactivity():
             for container in managed:
                 name = container["name"]
                 labels = container["labels"]
+                group = labels.get("autostart.group", "")
 
                 stop_delay_str = labels.get("autostart.stop-delay", "10m")
                 try:
@@ -180,13 +183,23 @@ async def check_inactivity():
                 last_time = last_request_time.get(name)
                 if last_time and (now - last_time) >= stop_delay:
                     if container["status"] == "running":
-                        success = manager.stop_container(name)
+                        manager.stop_container(name)
                         await event_queue.put({
                             "type": "auto_stop",
                             "container": name,
                             "message": f"Stopped due to inactivity ({stop_delay_str} timeout)",
                         })
                         print(f"Auto-stopped {name} due to inactivity")
+
+                        if group:
+                            for other in managed:
+                                if other["group"] == group and other["name"] != name and other["status"] == "running":
+                                    manager.stop_container(other["name"])
+                                    await event_queue.put({
+                                        "type": "auto_stop",
+                                        "container": other["name"],
+                                        "message": f"Stopped group {group} due to inactivity",
+                                    })
 
             await asyncio.sleep(30)
         except Exception as e:
@@ -247,6 +260,13 @@ app.add_middleware(
 )
 
 
+def start_group(group: str, exclude_name: str = None):
+    containers = manager.find_managed_containers()
+    for c in containers:
+        if c["group"] == group and c["name"] != exclude_name and c["status"] != "running":
+            manager.start_container(c["name"])
+
+
 @app.post("/wake")
 async def wake(request: Request):
     try:
@@ -264,11 +284,14 @@ async def wake(request: Request):
 
     name = container["name"]
     labels = container["labels"]
+    group = labels.get("autostart.group", "")
 
     last_request_time[name] = datetime.now()
 
     if container["status"] != "running":
         success = manager.start_container(name)
+        if group:
+            start_group(group, name)
         if success:
             await event_queue.put({
                 "type": "wake",
