@@ -27,6 +27,11 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Create git tag
+        run: |
+          git tag v${{ steps.version.outputs.version }}
+          git push origin v${{ steps.version.outputs.version }}
+
       - name: Create plugin tarball
         run: |
           tar -czf plugin.tar.gz middleware.go .traefik.yml go.mod
