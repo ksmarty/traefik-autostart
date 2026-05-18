@@ -29,7 +29,6 @@ jobs:
 
       - name: Create plugin tarball
         run: |
-          cd traefik-plugin
           tar -czf plugin.tar.gz middleware.go .traefik.yml go.mod
 
       - name: Create Release
@@ -39,7 +38,7 @@ jobs:
           name: v${{ steps.version.outputs.version }}
           draft: false
           generate_release_notes: true
-          files: traefik-plugin/plugin.tar.gz
+          files: plugin.tar.gz
 
       - name: Update version
         if: github.event.inputs.version == ''
