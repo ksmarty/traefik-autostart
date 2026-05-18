@@ -284,15 +284,13 @@
 
   <script>
     function app() {
-      // Store the EventSource and refresh timer outside Alpine's reactive scope.
-      //
+      // Store the EventSource outside Alpine's reactive scope.
       // Alpine v3 wraps every property of the returned object in a JavaScript Proxy to
       // track reactivity. If EventSource were stored as this._sse, Alpine would return a
       // Proxy(EventSource) on access. Setting .onopen / .onmessage on that Proxy may not
       // correctly delegate to the underlying object's event handler slots, so the callbacks
       // never fire. A plain closure variable is invisible to Alpine and never proxied.
       let _sse = null;
-      let _refreshTimer = null;
 
       return {
         containers: [],
@@ -328,7 +326,7 @@
         // Alpine calls init() automatically — do NOT add x-init="init()" to the element.
         async init() {
           // Show the spinner only during the initial page load.
-          // Background refreshes (interval / SSE reconnect) update containers in place
+          // Background refreshes (SSE reconnect) update containers in place
           // without touching this flag, so the table never flashes or unmounts.
           this.loading = true;
           try {
@@ -337,9 +335,8 @@
             this.loading = false;
           }
           this.connectSSE();
-          // Periodic fallback: re-sync the full container list every 30 s.
-          // This catches any state changes that arrived while SSE was reconnecting.
-          _refreshTimer = setInterval(() => this.fetchAll(), 30000);
+          // No setInterval — the backend pushes "sync" events every 10 s via SSE,
+          // so the frontend never needs to poll.
         },
 
         // Full container list. Does NOT touch this.loading — only init() does that,
@@ -408,6 +405,13 @@
               return;
             }
 
+            // 'sync' events carry the full container list pushed by the server
+            // every 10 s. Replace the array in place so Alpine diffs the rows.
+            if (data.type === 'sync' && Array.isArray(data.containers)) {
+              this.containers = data.containers;
+              return;
+            }
+
             // 'request' events fire on every proxied HTTP request.
             // They don't change container state and clutter the log — skip them.
             if (data.type !== 'request') {
@@ -415,10 +419,21 @@
               if (this.events.length > 100) this.events.length = 100;
             }
 
-            // Re-fetch the container for any event that changes its state.
+            // State-changing events carry the updated container dict inline.
+            // Apply it directly — no extra HTTP round-trip needed.
             const stateEvents = ['starting', 'ready', 'auto_stop', 'manual_start', 'manual_stop', 'error'];
             if (data.container && stateEvents.includes(data.type)) {
-              this.fetchOne(data.container);
+              if (data.state) {
+                const idx = this.containers.findIndex(c => c.name === data.container);
+                if (idx >= 0) {
+                  this.containers.splice(idx, 1, data.state);
+                } else {
+                  this.containers.push(data.state);
+                }
+              } else {
+                // Fallback: fetch from API if the event doesn't include state.
+                this.fetchOne(data.container);
+              }
             }
           };
 

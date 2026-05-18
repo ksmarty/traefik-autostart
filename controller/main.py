@@ -36,13 +36,87 @@ events_history: list[dict] = []  # rolling buffer of recent events for new page 
 
 
 async def broadcast(event: dict) -> None:
-    """Push an event to every connected SSE client and append it to the history buffer."""
+    """Push an event to every connected SSE client and append it to the history buffer.
+
+    'sync' events are operational (periodic container-list pushes) and are never stored
+    in events_history — they are not log-worthy and would flood the 100-item buffer.
+    """
     event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
-    events_history.append(event)
-    if len(events_history) > 100:
-        events_history.pop(0)
+    if event.get("type") != "sync":
+        events_history.append(event)
+        if len(events_history) > 100:
+            events_history.pop(0)
     for q in subscribers:
         await q.put(event)
+
+
+# ─── Container payload helpers ────────────────────────────────────────────────
+
+def _fetch_container_data(name: str, override_status: str | None = None) -> dict | None:
+    """Blocking. Inspect a single managed container and return the webui dict.
+
+    Uses one Docker API call (GET /containers/{id}/json) to obtain both status
+    and health in a single round-trip. Returns None if the container is not found.
+    override_status lets callers substitute a virtual status (e.g. "starting")
+    for the Docker-reported one.
+    """
+    try:
+        c = manager.docker.containers.get(name)
+        labels = c.labels
+        health_info = c.attrs.get("State", {}).get("Health", {})
+        health = health_info.get("Status", c.status) if health_info else c.status
+        last_req = last_request_time.get(name)
+        return {
+            "name": c.name,
+            "short_id": c.short_id,
+            "status": override_status if override_status is not None else c.status,
+            "health": health,
+            "stop_delay": labels.get("autostart.stop-delay", "not set"),
+            "last_request": last_req.isoformat() if last_req else None,
+            "service": labels.get("com.docker.compose.service", c.name),
+            "project": labels.get("com.docker.compose.project", ""),
+            "group": labels.get("autostart.group", ""),
+        }
+    except Exception:
+        return None
+
+
+def _fetch_all_containers_data() -> list[dict]:
+    """Blocking. List all managed containers and inspect each one for its full state.
+
+    Uses one docker list call to enumerate managed containers, then one reload()
+    per container to obtain Health status (not available from the list API).
+    Total cost: 1 + N Docker API calls where N is the number of managed containers.
+    """
+    try:
+        all_containers = manager.docker.containers.list(all=True)
+    except Exception as e:
+        print(f"_fetch_all_containers_data list failed: {e}")
+        return []
+    result = []
+    for c in all_containers:
+        if not (c.labels.get("autostart.enable") == "true" or c.labels.get("autostart.group")):
+            continue
+        try:
+            c.reload()  # fetch full State including Health
+        except Exception:
+            pass  # use whatever attrs the list call returned
+        labels = c.labels
+        health_info = c.attrs.get("State", {}).get("Health", {})
+        health = health_info.get("Status", c.status) if health_info else c.status
+        last_req = last_request_time.get(c.name)
+        result.append({
+            "name": c.name,
+            "short_id": c.short_id,
+            "status": c.status,
+            "health": health,
+            "stop_delay": labels.get("autostart.stop-delay", "not set"),
+            "last_request": last_req.isoformat() if last_req else None,
+            "service": labels.get("com.docker.compose.service", c.name),
+            "project": labels.get("com.docker.compose.project", ""),
+            "group": labels.get("autostart.group", ""),
+        })
+    return result
 
 client: Optional[docker.DockerClient] = None
 
@@ -221,6 +295,24 @@ async def wait_for_traefik_backend(host: str, timeout: int = 15) -> bool:
     return False
 
 
+async def periodic_container_sync():
+    """Push the full managed container list to all SSE clients every 10 s.
+
+    This replaces frontend polling entirely: the webui receives fresh state on a
+    fixed cadence without making any HTTP requests. The Docker API calls are skipped
+    when no clients are connected.
+    """
+    while True:
+        await asyncio.sleep(10)
+        if not subscribers:
+            continue
+        try:
+            containers = await asyncio.to_thread(_fetch_all_containers_data)
+            await broadcast({"type": "sync", "containers": containers})
+        except Exception as e:
+            print(f"periodic_container_sync error: {e}")
+
+
 async def start_container_task(name: str, group: str, host: str):
     """Start a container in the background, then wait for Traefik to register the backend.
 
@@ -236,17 +328,21 @@ async def start_container_task(name: str, group: str, host: str):
             # Without this, the middleware forwards the request into an empty backend pool.
             await wait_for_traefik_backend(host)
             print(f"Container {name} ready for host {host}")
+            state = await asyncio.to_thread(_fetch_container_data, name)
             await broadcast({
                 "type": "ready",
                 "container": name,
                 "message": f"Container started for host: {host}",
+                "state": state,
             })
         else:
             print(f"Failed to start container {name}")
+            state = await asyncio.to_thread(_fetch_container_data, name)
             await broadcast({
                 "type": "error",
                 "container": name,
                 "message": f"Failed to start container for host: {host}",
+                "state": state,
             })
     finally:
         starting_containers.discard(name)
@@ -273,10 +369,12 @@ async def check_inactivity():
                 if last_time and (now - last_time) >= stop_delay:
                     if container["status"] == "running":
                         await asyncio.to_thread(manager.stop_container, name)
+                        state = await asyncio.to_thread(_fetch_container_data, name)
                         await broadcast({
                             "type": "auto_stop",
                             "container": name,
                             "message": f"Stopped due to inactivity ({stop_delay_str} timeout)",
+                            "state": state,
                         })
                         print(f"Auto-stopped {name} due to inactivity")
 
@@ -284,10 +382,12 @@ async def check_inactivity():
                             for other in managed:
                                 if other["group"] == group and other["name"] != name and other["status"] == "running":
                                     await asyncio.to_thread(manager.stop_container, other["name"])
+                                    other_state = await asyncio.to_thread(_fetch_container_data, other["name"])
                                     await broadcast({
                                         "type": "auto_stop",
                                         "container": other["name"],
                                         "message": f"Stopped group {group} due to inactivity",
+                                        "state": other_state,
                                     })
 
             await asyncio.sleep(30)
@@ -351,6 +451,7 @@ async def lifespan(app: FastAPI):
     # Without this, FastAPI blocks all requests until every container has been stopped.
     asyncio.create_task(asyncio.to_thread(stop_all_managed_containers))
     asyncio.create_task(check_inactivity())
+    asyncio.create_task(periodic_container_sync())
     yield
 
 
@@ -410,10 +511,14 @@ async def wake(request: Request):
         starting_containers.add(name)
         container_start_times[name] = now
         asyncio.create_task(start_container_task(name, group, host))
+        # Override status to "starting" in the embedded state: Docker still reports
+        # "exited" at this point since the container process hasn't launched yet.
+        state = await asyncio.to_thread(_fetch_container_data, name, "starting")
         await broadcast({
             "type": "starting",
             "container": name,
             "message": f"Starting container for host: {host}",
+            "state": state,
         })
 
     # Build per-container group status for the loading page.
@@ -444,50 +549,16 @@ async def wake(request: Request):
 
 @app.get("/containers")
 async def list_containers():
-    containers = manager.find_managed_containers()
-    result = []
-
-    for c in containers:
-        name = c["name"]
-        stop_delay = c["labels"].get("autostart.stop-delay", "not set")
-        last_req = last_request_time.get(name)
-
-        result.append({
-            "name": name,
-            "short_id": c["short_id"],
-            "status": c["status"],
-            "health": manager.get_container_status(name),
-            "stop_delay": stop_delay,
-            "last_request": last_req.isoformat() if last_req else None,
-            "service": c["service_name"],
-            "project": c["project"],
-            "group": c["group"],
-            "labels": c["labels"],
-        })
-
-    return result
+    return await asyncio.to_thread(_fetch_all_containers_data)
 
 
 @app.get("/containers/{name}")
 async def get_container(name: str):
     """Return the current state of a single managed container."""
-    container = manager.find_container_by_name(name)
-    if not container:
+    data = await asyncio.to_thread(_fetch_container_data, name)
+    if not data:
         raise HTTPException(status_code=404, detail="Container not found")
-    labels = container["labels"]
-    last_req = last_request_time.get(name)
-    return {
-        "name": container["name"],
-        "short_id": container["short_id"],
-        "status": container["status"],
-        "health": manager.get_container_status(name),
-        "stop_delay": labels.get("autostart.stop-delay", "not set"),
-        "last_request": last_req.isoformat() if last_req else None,
-        "service": labels.get("com.docker.compose.service", container["name"]),
-        "project": labels.get("com.docker.compose.project", ""),
-        "group": labels.get("autostart.group", ""),
-        "labels": labels,
-    }
+    return data
 
 
 @app.post("/containers/{name}/start")
@@ -495,10 +566,12 @@ async def start_container(name: str):
     success = await asyncio.to_thread(manager.start_container, name)
     if success:
         last_request_time[name] = datetime.now(timezone.utc)
+        state = await asyncio.to_thread(_fetch_container_data, name)
         await broadcast({
             "type": "manual_start",
             "container": name,
             "message": "Container manually started",
+            "state": state,
         })
         return {"status": "ok"}
     raise HTTPException(status_code=500, detail="Failed to start container")
@@ -508,10 +581,12 @@ async def start_container(name: str):
 async def stop_container(name: str):
     success = await asyncio.to_thread(manager.stop_container, name)
     if success:
+        state = await asyncio.to_thread(_fetch_container_data, name)
         await broadcast({
             "type": "manual_stop",
             "container": name,
-            "message": f"Container manually stopped",
+            "message": "Container manually stopped",
+            "state": state,
         })
         return {"status": "ok"}
     raise HTTPException(status_code=500, detail="Failed to stop container")
@@ -531,10 +606,12 @@ async def stop_group(name: str):
         success = await asyncio.to_thread(manager.stop_container, c["name"])
         if success:
             stopped.append(c["name"])
+            state = await asyncio.to_thread(_fetch_container_data, c["name"])
             await broadcast({
                 "type": "manual_stop",
                 "container": c["name"],
                 "message": f"Stopped as part of group '{name}'",
+                "state": state,
             })
         else:
             errors.append(c["name"])
