@@ -1,3 +1,3 @@
-module github.com/kyleschwartz/traefik-autostart
+module github.com/ksmarty/traefik-container-sleep
 
 go 1.21
