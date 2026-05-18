@@ -52,7 +52,7 @@ func (cfg *Config) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		http.Error(rw, "Internal error", http.StatusInternalServerError)
+		cfg.serveLandingPage(rw, host)
 		return
 	}
 

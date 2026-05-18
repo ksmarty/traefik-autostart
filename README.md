@@ -82,10 +82,13 @@ Add these labels to your containers to enable auto-start:
 ```yaml
 labels:
   - "autostart.enable=true"
+  - "traefik.docker.allownonrunning=true"
   - "traefik.enable=true"
   - "traefik.http.routers.myservice.rule=Host(`myapp.local`)"
   - "traefik.http.routers.myservice.middlewares=autostart"
 ```
+
+The `autostart.enable=true` label tells the controller to manage this container. The `traefik.docker.allownonrunning=true` label keeps Traefik's router active while the container is stopped.
 
 The `autostart.enable=true` label enables auto-start management. The `autostart.stop-delay` label configures how long to wait before stopping an idle container.
 

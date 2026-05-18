@@ -54,10 +54,11 @@ services:
     container_name: sleepy-nginx
     labels:
       - "autostart.enable=true"
+      - "traefik.docker.allownonrunning=true"
       - "traefik.enable=true"
       - "traefik.http.routers.nginx.rule=Host(`sleepy.local`)"
       - "traefik.http.routers.nginx.entrypoints=web"
-      - "traefik.http.routers.nginx.middlewares=autostart@file"
+      - "traefik.http.routers.nginx.middlewares=autostart"
       - "traefik.http.services.nginx.loadbalancer.server.port=80"
       - "autostart.stop-delay=5m"
     networks:
@@ -76,10 +77,11 @@ services:
     labels:
       - "autostart.enable=true"
       - "autostart.group=api"
+      - "traefik.docker.allownonrunning=true"
       - "traefik.enable=true"
       - "traefik.http.routers.api.rule=Host(`api.sleepy.local`)"
       - "traefik.http.routers.api.entrypoints=web"
-      - "traefik.http.routers.api.middlewares=autostart@file"
+      - "traefik.http.routers.api.middlewares=autostart"
       - "traefik.http.services.api.loadbalancer.server.port=8080"
       - "autostart.stop-delay=2m"
     networks:
