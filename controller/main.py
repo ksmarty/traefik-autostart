@@ -502,7 +502,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Container Sleep Controller", lifespan=lifespan)
+app = FastAPI(title="Traefik Autostart Controller", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
