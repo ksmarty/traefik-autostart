@@ -52,44 +52,52 @@ class ContainerManager:
 
     def find_container_by_host(self, host: str) -> Optional[dict]:
         managed = self.find_managed_containers()
+        print(f"[DEBUG] find_container_by_host: looking for host={host}, managed_containers={[c['name'] for c in managed]}")
 
         # Primary: check traefik router rule labels directly on managed containers.
-        # This is fast and works for all containers with explicit Host() rules.
         for c in managed:
+            print(f"[DEBUG] Checking container: {c['name']}")
             for key, value in c["labels"].items():
                 if key.startswith("traefik.http.routers.") and key.endswith(".rule"):
+                    print(f"[DEBUG]   Found router rule label: {key} = {value}")
                     if f"Host(`{host}`)" in value:
+                        print(f"[DEBUG]   MATCH! Returning container: {c['name']}")
                         return c
 
-        # Fallback: query Traefik API for containers using defaultRule or other discovery.
-        # Docker provider service names are "{slug}@docker"; the slug matches the compose
-        # service name (com.docker.compose.service) or an explicit traefik service label.
+        # Fallback: query Traefik API
+        print(f"[DEBUG] No match in labels, querying Traefik API at {TRAEFIK_API_URL}")
         try:
             resp = httpx.get(f"{TRAEFIK_API_URL}/api/rawdata", timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
-            for router_name, router_data in data.get("routers", {}).items():
+            routers = data.get("routers", {})
+            print(f"[DEBUG] Traefik has {len(routers)} routers: {list(routers.keys())}")
+
+            for router_name, router_data in routers.items():
                 rule = router_data.get("rule", "")
+                print(f"[DEBUG]   Router {router_name}: rule={rule}")
                 if f"Host(`{host}`)" not in rule:
                     continue
 
                 service_name = router_data.get("service", "")
-                if not service_name:
-                    continue
+                print(f"[DEBUG]   Router {router_name} matches, service={service_name}")
 
                 slug = service_name.rsplit("@", 1)[0] if "@" in service_name else service_name
 
                 for c in managed:
                     labels = c["labels"]
                     if c["name"] == slug or c["service_name"] == slug:
+                        print(f"[DEBUG]   Found container by slug: {c['name']}")
                         return c
                     if any(k.startswith(f"traefik.http.services.{slug}.") for k in labels):
+                        print(f"[DEBUG]   Found container by service label: {c['name']}")
                         return c
 
         except Exception as e:
-            print(f"Error querying Traefik API: {e}")
+            print(f"[ERROR] Error querying Traefik API: {e}")
 
+        print(f"[DEBUG] No container found for host={host}")
         return None
 
     def find_container_by_name(self, name: str) -> Optional[dict]:
@@ -385,6 +393,27 @@ async def stop_container(name: str):
 @app.get("/events")
 async def events():
     return EventSourceResponse(event_generator())
+
+
+@app.get("/debug/traefik-test")
+async def traefik_test():
+    """Test connectivity to the Traefik API."""
+    try:
+        resp = httpx.get(f"{TRAEFIK_API_URL}/api/rawdata", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        routers = list(data.get("routers", {}).keys())
+        services = list(data.get("services", {}).keys())
+        return {
+            "status": "ok",
+            "traefik_url": TRAEFIK_API_URL,
+            "routers_count": len(routers),
+            "services_count": len(services),
+            "sample_routers": routers[:5],
+            "sample_services": services[:5],
+        }
+    except Exception as e:
+        return {"status": "error", "traefik_url": TRAEFIK_API_URL, "error": str(e)}
 
 
 @app.get("/health")
