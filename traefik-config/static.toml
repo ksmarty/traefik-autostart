@@ -1,0 +1,4 @@
+[experimental.plugins.autostart]
+moduleName = "github.com/ksmarty/traefik-container-sleep"
+version = "v0.0.2"
+url = "https://github.com/ksmarty/traefik-container-sleep/releases/download/v0.0.2/plugin.tar.gz"
