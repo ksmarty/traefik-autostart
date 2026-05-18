@@ -27,7 +27,22 @@ containers_state: dict[str, dict] = {}
 last_request_time: dict[str, datetime] = {}
 starting_containers: set[str] = set()
 container_start_times: dict[str, datetime] = {}
-event_queue: asyncio.Queue = asyncio.Queue()
+
+# Pub-sub: each SSE connection gets its own queue; broadcast() fans out to all of them.
+# Using a single shared asyncio.Queue meant multiple connections competing for the same
+# events — each event only reached one client instead of all of them.
+subscribers: list[asyncio.Queue] = []
+events_history: list[dict] = []  # rolling buffer of recent events for new page loads
+
+
+async def broadcast(event: dict) -> None:
+    """Push an event to every connected SSE client and append it to the history buffer."""
+    event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+    events_history.append(event)
+    if len(events_history) > 100:
+        events_history.pop(0)
+    for q in subscribers:
+        await q.put(event)
 
 client: Optional[docker.DockerClient] = None
 
@@ -221,14 +236,14 @@ async def start_container_task(name: str, group: str, host: str):
             # Without this, the middleware forwards the request into an empty backend pool.
             await wait_for_traefik_backend(host)
             print(f"Container {name} ready for host {host}")
-            await event_queue.put({
+            await broadcast({
                 "type": "ready",
                 "container": name,
                 "message": f"Container started for host: {host}",
             })
         else:
             print(f"Failed to start container {name}")
-            await event_queue.put({
+            await broadcast({
                 "type": "error",
                 "container": name,
                 "message": f"Failed to start container for host: {host}",
@@ -258,7 +273,7 @@ async def check_inactivity():
                 if last_time and (now - last_time) >= stop_delay:
                     if container["status"] == "running":
                         await asyncio.to_thread(manager.stop_container, name)
-                        await event_queue.put({
+                        await broadcast({
                             "type": "auto_stop",
                             "container": name,
                             "message": f"Stopped due to inactivity ({stop_delay_str} timeout)",
@@ -269,7 +284,7 @@ async def check_inactivity():
                             for other in managed:
                                 if other["group"] == group and other["name"] != name and other["status"] == "running":
                                     await asyncio.to_thread(manager.stop_container, other["name"])
-                                    await event_queue.put({
+                                    await broadcast({
                                         "type": "auto_stop",
                                         "container": other["name"],
                                         "message": f"Stopped group {group} due to inactivity",
@@ -293,17 +308,22 @@ def parse_duration(s: str) -> float:
 
 
 async def event_generator():
-    # Send an immediate ping so the browser's EventSource fires onmessage quickly,
-    # allowing the connected indicator to update without waiting for a real event.
-    yield json.dumps({"type": "ping"})
-    while True:
-        try:
-            event = await asyncio.wait_for(event_queue.get(), timeout=25)
-        except asyncio.TimeoutError:
-            # Keepalive: prevents proxies from closing idle SSE connections
-            yield json.dumps({"type": "ping"})
-            continue
-        yield json.dumps(event)
+    q: asyncio.Queue = asyncio.Queue()
+    subscribers.append(q)
+    try:
+        # Immediate ping confirms the connection to the browser.
+        yield json.dumps({"type": "ping"})
+        while True:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=25)
+            except asyncio.TimeoutError:
+                # Keepalive: prevents proxies from closing idle SSE connections.
+                yield json.dumps({"type": "ping"})
+                continue
+            yield json.dumps(event)
+    finally:
+        # Clean up when the client disconnects.
+        subscribers.remove(q)
 
 
 def stop_all_managed_containers():
@@ -380,7 +400,7 @@ async def wake(request: Request):
 
     # Container is running and Traefik backend is ready — forward the request.
     if container["status"] == "running" and name not in starting_containers:
-        await event_queue.put({
+        await broadcast({
             "type": "request",
             "container": name,
             "message": f"Request forwarded for host: {host}",
@@ -395,7 +415,7 @@ async def wake(request: Request):
         starting_containers.add(name)
         container_start_times[name] = now
         asyncio.create_task(start_container_task(name, group, host))
-        await event_queue.put({
+        await broadcast({
             "type": "starting",
             "container": name,
             "message": f"Starting container for host: {host}",
@@ -480,7 +500,7 @@ async def start_container(name: str):
     success = await asyncio.to_thread(manager.start_container, name)
     if success:
         last_request_time[name] = datetime.now(timezone.utc)
-        await event_queue.put({
+        await broadcast({
             "type": "manual_start",
             "container": name,
             "message": "Container manually started",
@@ -493,13 +513,19 @@ async def start_container(name: str):
 async def stop_container(name: str):
     success = await asyncio.to_thread(manager.stop_container, name)
     if success:
-        await event_queue.put({
+        await broadcast({
             "type": "manual_stop",
             "container": name,
             "message": f"Container manually stopped",
         })
         return {"status": "ok"}
     raise HTTPException(status_code=500, detail="Failed to stop container")
+
+
+@app.get("/events/history")
+async def get_events_history():
+    """Return the most recent events for pre-populating the webui event log."""
+    return events_history
 
 
 @app.get("/events")

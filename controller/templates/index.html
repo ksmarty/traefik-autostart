@@ -85,14 +85,11 @@
                   <template x-for="c in containers" :key="c.name">
                     <tr class="hover:bg-gray-750 transition-colors">
 
-                      <!-- Name + service + group -->
+                      <!-- Name + group badge (no service subtitle) -->
                       <td class="px-6 py-3.5">
                         <div class="font-medium text-gray-200" x-text="c.name"></div>
-                        <div class="text-xs text-gray-500 mt-0.5 space-x-2">
-                          <span x-show="c.service || c.project"
-                            x-text="c.service + (c.project ? ' · ' + c.project : '')"></span>
-                          <!-- Group badge — only shown when the container belongs to a group -->
-                          <span x-show="c.group"
+                        <div class="mt-0.5" x-show="c.group">
+                          <span
                             class="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300"
                             x-text="'group: ' + c.group"></span>
                         </div>
@@ -233,7 +230,7 @@
 
         // Alpine calls init() automatically — do NOT add x-init="init()" to the element.
         async init() {
-          await this.fetchAll();
+          await Promise.all([this.fetchAll(), this.fetchHistory()]);
           this.connectSSE();
         },
 
@@ -249,6 +246,23 @@
             console.error('fetchAll failed:', e);
           } finally {
             this.loading = false;
+          }
+        },
+
+        // Load recent event history so the log isn't empty on page open.
+        async fetchHistory() {
+          try {
+            const res = await fetch('/events/history');
+            if (res.ok) {
+              const history = await res.json();
+              // History is oldest-first from the server; we display newest-first.
+              this.events = history.reverse().map(e => ({
+                ...e,
+                timestamp: e.timestamp || new Date().toISOString(),
+              }));
+            }
+          } catch (e) {
+            console.error('fetchHistory failed:', e);
           }
         },
 
@@ -274,12 +288,15 @@
           if (this._sse) this._sse.close();
           this._sse = new EventSource('/events');
 
+          // Set connected as soon as the HTTP connection is established —
+          // don't wait for the first message to arrive.
+          this._sse.onopen = () => { this.connected = true; };
+
           this._sse.onmessage = (e) => {
             let data;
             try { data = JSON.parse(e.data); } catch { return; }
 
-            // The server sends periodic 'ping' keepalives — use the first one to confirm
-            // the SSE connection is alive, then ignore subsequent pings.
+            // 'ping' keepalives confirm the connection is alive; ignore them otherwise.
             if (data.type === 'ping') {
               this.connected = true;
               return;

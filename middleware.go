@@ -111,8 +111,9 @@ func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	serverElapsed := result.elapsed
 	localStart := time.Now()
 
-	deadline := time.NewTimer(a.timeout)
-	defer deadline.Stop()
+	// No server-side deadline — the stream stays open until the container is ready or
+	// the browser navigates away. The landing page includes a JS fallback that silently
+	// polls if the HTTP stream ever closes early (e.g. a proxy timeout).
 	tick := time.NewTicker(1 * time.Second)
 	defer tick.Stop()
 
@@ -120,16 +121,6 @@ func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		select {
 		case <-req.Context().Done():
 			// Browser navigated away — stop streaming.
-			return
-
-		case <-deadline.C:
-			// Timeout reached. Auto-reload so the browser gets a fresh streaming
-			// connection — the container may still be starting up.
-			elapsed := serverElapsed + int(time.Since(localStart).Seconds())
-			push(rw, flusher, canFlush, fmt.Sprintf(
-				`u('Still starting\u2026 reconnecting in 3s',%d,null)`, elapsed,
-			))
-			push(rw, flusher, canFlush, `setTimeout(function(){window.location.reload()},3000)`)
 			return
 
 		case <-tick.C:
@@ -150,8 +141,10 @@ func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 				msg = `Waiting for health check\u2026`
 			case elapsed < 40:
 				msg = `Registering with Traefik\u2026`
-			default:
+			case elapsed < 90:
 				msg = `Almost ready\u2026`
+			default:
+				msg = fmt.Sprintf(`Still starting\u2026 (%ds)`, elapsed)
 			}
 			push(rw, flusher, canFlush, fmt.Sprintf("u('%s',%d,%s)", msg, elapsed, groupToJS(result.group)))
 		}
@@ -297,4 +290,16 @@ const landingPageHTML = `<!DOCTYPE html>
         g.style.display = 'none';
       }
     }
+    // Fallback: if the HTTP stream closes early (e.g. a proxy resets the connection),
+    // this quietly polls in the background. While the stream is alive each fetch returns
+    // 503 and is aborted immediately — no visible effect. When the container is ready
+    // (non-503) the page reloads seamlessly.
+    (function() {
+      var t = setInterval(function() {
+        var c = new AbortController();
+        fetch(location.href, { credentials: 'include', signal: c.signal })
+          .then(function(r) { c.abort(); if (r.status !== 503) { location.reload(); } })
+          .catch(function() {});
+      }, 3000);
+    }());
   </script>`
