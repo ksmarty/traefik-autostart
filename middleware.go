@@ -1,3 +1,4 @@
+// Plugin a autostart plugin.
 package main
 
 import (
@@ -19,28 +20,30 @@ type Config struct {
 	URL     string        `json:"url"`
 }
 
-func New(ctx context.Context, config map[string]interface{}) (interface{}, error) {
-	cfg := Config{
+func CreateConfig() *Config {
+	return &Config{
 		Timeout: defaultTimeout,
 		URL:     defaultURL,
 	}
-
-	if timeout, ok := config["timeout"].(string); ok {
-		d, err := time.ParseDuration(timeout)
-		if err != nil {
-			return nil, fmt.Errorf("invalid timeout: %w", err)
-		}
-		cfg.Timeout = d
-	}
-
-	if url, ok := config["url"].(string); ok {
-		cfg.URL = url
-	}
-
-	return &cfg, nil
 }
 
-func (cfg *Config) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+type AutoStart struct {
+	next    http.Handler
+	timeout time.Duration
+	url     string
+	name    string
+}
+
+func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
+	return &AutoStart{
+		next:    next,
+		timeout: config.Timeout,
+		url:     config.URL,
+		name:    name,
+	}, nil
+}
+
+func (a *AutoStart) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	host := req.Host
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
@@ -52,37 +55,38 @@ func (cfg *Config) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		cfg.serveLandingPage(rw, host)
+		a.serveLandingPage(rw, host)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(req.Context(), cfg.Timeout)
+	ctx, cancel := context.WithTimeout(req.Context(), a.timeout)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, strings.NewReader(string(body)))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url, strings.NewReader(string(body)))
 	if err != nil {
-		cfg.serveLandingPage(rw, host)
+		a.serveLandingPage(rw, host)
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: cfg.Timeout}
+	client := &http.Client{Timeout: a.timeout}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		cfg.serveLandingPage(rw, host)
+		a.serveLandingPage(rw, host)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
 		rw.Header().Set("X-Wake-Status", "ready")
+		a.next.ServeHTTP(rw, req)
 		return
 	}
 
-	cfg.serveLandingPage(rw, host)
+	a.serveLandingPage(rw, host)
 }
 
-func (cfg *Config) serveLandingPage(rw http.ResponseWriter, host string) {
+func (a *AutoStart) serveLandingPage(rw http.ResponseWriter, host string) {
 	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 	rw.WriteHeader(http.StatusServiceUnavailable)
 	fmt.Fprint(rw, `<!DOCTYPE html>
