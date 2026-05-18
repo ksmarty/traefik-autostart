@@ -1,4 +1,4 @@
-# traefik-container-sleep
+# traefik-autostart
 
 Wake-on-request for Docker containers. Keeps services stopped when idle, starts them automatically when traffic arrives, and stops them again after a configurable inactivity timeout.
 
@@ -24,7 +24,7 @@ Download the latest release and extract the plugin files:
 
 ```bash
 mkdir -p ./plugin
-curl -sL https://github.com/ksmarty/traefik-container-sleep/releases/latest/download/plugin.tar.gz \
+curl -sL https://github.com/ksmarty/traefik-autostart/releases/latest/download/plugin.tar.gz \
   | tar -xz -C ./plugin
 ```
 
@@ -39,7 +39,7 @@ Mount the plugin directory into Traefik and register it as a local plugin.
 ### Volume mount
 
 ```
-./plugin:/plugins-local/src/github.com/ksmarty/traefik-container-sleep:ro
+./plugin:/plugins-local/src/github.com/ksmarty/traefik-autostart:ro
 ```
 
 ### Static config
@@ -48,7 +48,7 @@ Pick one format:
 
 **CLI flags**
 ```
---experimental.localPlugins.autostart.modulename=github.com/ksmarty/traefik-container-sleep
+--experimental.localPlugins.autostart.modulename=github.com/ksmarty/traefik-autostart
 ```
 
 **YAML** (`traefik.yml`)
@@ -56,13 +56,13 @@ Pick one format:
 experimental:
   localPlugins:
     autostart:
-      moduleName: github.com/ksmarty/traefik-container-sleep
+      moduleName: github.com/ksmarty/traefik-autostart
 ```
 
 **TOML** (`traefik.toml`)
 ```toml
 [experimental.localPlugins.autostart]
-  moduleName = "github.com/ksmarty/traefik-container-sleep"
+  moduleName = "github.com/ksmarty/traefik-autostart"
 ```
 
 ### Dynamic config (middleware definition)
@@ -91,13 +91,13 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e TRAEFIK_API_URL=http://traefik:8080 \
   -p 5000:5000 \
-  ghcr.io/ksmarty/traefik-container-sleep:latest
+  ghcr.io/ksmarty/traefik-autostart:latest
 ```
 
 **docker compose**
 ```yaml
 controller:
-  image: ghcr.io/ksmarty/traefik-container-sleep:latest
+  image: ghcr.io/ksmarty/traefik-autostart:latest
   restart: unless-stopped
   volumes:
     - /var/run/docker.sock:/var/run/docker.sock
@@ -152,17 +152,17 @@ services:
       - --providers.docker.exposedbydefault=false
       - --providers.file.directory=/etc/traefik/dynamic
       - --entrypoints.web.address=:80
-      - --experimental.localPlugins.autostart.modulename=github.com/ksmarty/traefik-container-sleep
+      - --experimental.localPlugins.autostart.modulename=github.com/ksmarty/traefik-autostart
     ports:
       - "80:80"
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./plugin:/plugins-local/src/github.com/ksmarty/traefik-container-sleep:ro
+      - ./plugin:/plugins-local/src/github.com/ksmarty/traefik-autostart:ro
       - ./dynamic.yml:/etc/traefik/dynamic/dynamic.yml:ro
 
   controller:
-    image: ghcr.io/ksmarty/traefik-container-sleep:latest
+    image: ghcr.io/ksmarty/traefik-autostart:latest
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -219,7 +219,7 @@ The controller exposes a web dashboard at `http://controller:5000/` showing live
 
 **Plugin not loading**
 - Confirm the `./plugin/` directory contains `middleware.go`, `.traefik.yml`, and `go.mod`
-- Confirm the volume mount path is exactly `/plugins-local/src/github.com/ksmarty/traefik-container-sleep`
+- Confirm the volume mount path is exactly `/plugins-local/src/github.com/ksmarty/traefik-autostart`
 - Check Traefik logs for plugin errors
 
 **Container not found for host**

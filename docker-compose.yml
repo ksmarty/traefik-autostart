@@ -30,7 +30,7 @@ services:
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - .:/plugins-local/src/github.com/ksmarty/traefik-container-sleep
+      - .:/plugins-local/src/github.com/ksmarty/traefik-autostart
       - ./traefik-config:/etc/traefik/dynamic
       - ./traefik-config/static.toml:/etc/traefik/static.toml:ro
     environment:
@@ -39,7 +39,7 @@ services:
       - web
 
   controller:
-    image: ghcr.io/ksmarty/traefik-container-sleep:latest
+    image: ghcr.io/ksmarty/traefik-autostart:latest
     container_name: controller
     ports:
       - "5000:5000"
