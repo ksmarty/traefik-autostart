@@ -30,7 +30,7 @@ services:
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./traefik-plugin:/plugins-local/src/github.com/ksmarty/traefik-container-sleep
+      - .:/plugins-local/src/github.com/ksmarty/traefik-container-sleep
       - ./traefik-config:/etc/traefik/dynamic
       - ./traefik-config/static.toml:/etc/traefik/static.toml:ro
     environment:
