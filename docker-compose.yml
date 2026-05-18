@@ -1,0 +1,88 @@
+version: "3.8"
+
+# For local development, use:
+#   controller:
+#     build:
+#       context: ./controller
+#       dockerfile: Dockerfile
+
+services:
+  traefik:
+    image: traefik:v3.1
+    container_name: traefik
+    command:
+      - "--api.insecure=true"
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--pilot.token=dashboard"
+      - "--experimental.localPlugins=true"
+      - "--entrypoints.web.address=:80"
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik-config:/etc/traefik/dynamic
+      - ./traefik-plugin:/plugins-local
+    environment:
+      - TRAEFIK_PLUGIN_LOCAL=/plugins-local
+    networks:
+      - web
+
+  controller:
+    image: ghcr.io/ksmarty/traefik-container-sleep:latest
+    container_name: controller
+    ports:
+      - "5000:5000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./controller/logs:/app/logs
+    environment:
+      - TRAEFIK_API_URL=http://traefik:8080
+      - DOCKER_SOCKET=/var/run/docker.sock
+    networks:
+      - web
+    depends_on:
+      - traefik
+
+  sleepy-nginx:
+    image: nginx:alpine
+    container_name: sleepy-nginx
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.allownonrunning=true"
+      - "traefik.http.routers.nginx.rule=Host(`sleepy.local`)"
+      - "traefik.http.routers.nginx.entrypoints=web"
+      - "traefik.http.routers.nginx.middlewares=autostart@file"
+      - "traefik.http.services.nginx.loadbalancer.server.port=80"
+      - "autostart.stop-delay=5m"
+    networks:
+      - web
+
+  sleepy-api:
+    image: hashicorp/http-echo:latest
+    container_name: sleepy-api
+    command: ["-text", "Hello from sleepy-api!", "-listen", ":8080"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.allownonrunning=true"
+      - "traefik.http.routers.api.rule=Host(`api.sleepy.local`)"
+      - "traefik.http.routers.api.entrypoints=web"
+      - "traefik.http.routers.api.middlewares=autostart@file"
+      - "traefik.http.services.api.loadbalancer.server.port=8080"
+      - "autostart.stop-delay=2m"
+    networks:
+      - web
+
+networks:
+  web:
+    name: web

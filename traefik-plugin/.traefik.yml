@@ -1,0 +1,13 @@
+middlewares:
+  autostart:
+    displayName: Auto Start Middleware
+    summary: Automatically starts containers on request
+    fields:
+      timeout:
+        type: number
+        default: 30
+        label: Timeout (seconds)
+      url:
+        type: string
+        default: http://controller:5000/wake
+        label: Controller URL
