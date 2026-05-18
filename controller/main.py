@@ -36,10 +36,7 @@ def get_docker_client() -> docker.DockerClient:
         socket_path = os.environ.get("DOCKER_SOCKET", "").strip() or "/var/run/docker.sock"
         print(f"Connecting to Docker socket: {socket_path}")
         try:
-            client = docker.DockerClient(
-                base_url=f"unix://{socket_path}",
-                api_version="auto"
-            )
+            client = docker.DockerClient(base_url=f"unix://{socket_path}")
             client.ping()
             print("Docker connection successful")
         except Exception as e:
