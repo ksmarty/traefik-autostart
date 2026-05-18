@@ -30,11 +30,8 @@ services:
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./traefik-plugin:/plugins-local
       - ./traefik-config:/etc/traefik/dynamic
       - ./traefik-config/static.yaml:/etc/traefik/static.yaml:ro
-    environment:
-      - TRAEFIK_PLUGIN_LOCAL=/plugins-local
     networks:
       - web
 
