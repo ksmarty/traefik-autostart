@@ -327,16 +327,24 @@
 
         // Alpine calls init() automatically — do NOT add x-init="init()" to the element.
         async init() {
-          await Promise.all([this.fetchAll(), this.fetchHistory()]);
+          // Show the spinner only during the initial page load.
+          // Background refreshes (interval / SSE reconnect) update containers in place
+          // without touching this flag, so the table never flashes or unmounts.
+          this.loading = true;
+          try {
+            await Promise.all([this.fetchAll(), this.fetchHistory()]);
+          } finally {
+            this.loading = false;
+          }
           this.connectSSE();
           // Periodic fallback: re-sync the full container list every 30 s.
           // This catches any state changes that arrived while SSE was reconnecting.
           _refreshTimer = setInterval(() => this.fetchAll(), 30000);
         },
 
-        // Full container list — called once on load and after SSE reconnects.
+        // Full container list. Does NOT touch this.loading — only init() does that,
+        // ensuring background refreshes never cause a flash or DOM tear-down.
         async fetchAll() {
-          this.loading = true;
           try {
             const res = await fetch('/containers');
             if (res.ok) {
@@ -344,8 +352,6 @@
             }
           } catch (e) {
             console.error('fetchAll failed:', e);
-          } finally {
-            this.loading = false;
           }
         },
 
