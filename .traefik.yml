@@ -1,20 +1,9 @@
-middlewares:
-  autostart:
-    displayName: Auto Start Middleware
-    summary: Automatically starts containers on request
-    testData:
-      http:
-        request:
-          host: test.local
-      configuration:
-        timeout: 30
-        url: http://controller:5000/wake
-    fields:
-      timeout:
-        type: number
-        default: 30
-        label: Timeout (seconds)
-      url:
-        type: string
-        default: http://controller:5000/wake
-        label: Controller URL
+displayName: Auto Start Middleware
+type: middleware
+import: github.com/ksmarty/traefik-container-sleep
+
+summary: Automatically starts Docker containers on incoming HTTP requests and stops them after inactivity.
+
+testData:
+  timeout: "30"
+  url: "http://controller:5000/wake"
