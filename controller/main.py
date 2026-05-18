@@ -400,11 +400,6 @@ async def wake(request: Request):
 
     # Container is running and Traefik backend is ready — forward the request.
     if container["status"] == "running" and name not in starting_containers:
-        await broadcast({
-            "type": "request",
-            "container": name,
-            "message": f"Request forwarded for host: {host}",
-        })
         return {"status": "ok", "container": name}
 
     # Container needs to start — fire a background task and return 202 immediately.
@@ -520,6 +515,32 @@ async def stop_container(name: str):
         })
         return {"status": "ok"}
     raise HTTPException(status_code=500, detail="Failed to stop container")
+
+
+@app.post("/groups/{name}/stop")
+async def stop_group(name: str):
+    """Stop every running container that belongs to the named group."""
+    containers = manager.find_managed_containers()
+    stopped = []
+    errors = []
+    for c in containers:
+        if c["group"] != name:
+            continue
+        if c["status"] != "running":
+            continue
+        success = await asyncio.to_thread(manager.stop_container, c["name"])
+        if success:
+            stopped.append(c["name"])
+            await broadcast({
+                "type": "manual_stop",
+                "container": c["name"],
+                "message": f"Stopped as part of group '{name}'",
+            })
+        else:
+            errors.append(c["name"])
+    if errors:
+        raise HTTPException(status_code=500, detail=f"Failed to stop: {', '.join(errors)}")
+    return {"status": "ok", "stopped": stopped}
 
 
 @app.get("/events/history")

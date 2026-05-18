@@ -28,8 +28,17 @@
     </div>
     <div class="flex items-center gap-4 text-sm text-gray-400">
       <span>
-        SSE:&nbsp;<span :class="connected ? 'text-green-400' : 'text-red-400'"
-          x-text="connected ? 'connected' : 'disconnected'"></span>
+        SSE:&nbsp;
+        <!--
+          Use inline :style instead of :class for the connected indicator.
+          twind scans the static HTML for class names to generate CSS; class names
+          that only appear inside Alpine `:class` expressions may be missed,
+          causing the colour to never render. Inline styles bypass twind entirely.
+        -->
+        <span
+          :style="connected ? 'color:#4ade80' : 'color:#f87171'"
+          x-text="connected ? 'connected' : 'disconnected'">
+        </span>
       </span>
     </div>
   </nav>
@@ -53,11 +62,28 @@
 
         <!-- Containers table -->
         <div class="lg:col-span-2 bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+
+          <!-- Card header -->
           <div class="px-6 py-4 border-b border-gray-700 flex items-center justify-between">
             <h2 class="font-semibold">Managed Containers</h2>
             <span class="text-sm text-gray-400"
               x-text="containers.length + ' container' + (containers.length !== 1 ? 's' : '')"></span>
           </div>
+
+          <!-- Bulk action bar — visible when one or more containers are selected -->
+          <template x-if="selected.length > 0">
+            <div class="px-6 py-2.5 bg-blue-950/40 border-b border-gray-700 flex items-center gap-5 text-sm">
+              <span class="text-blue-300" x-text="selected.length + ' selected'"></span>
+              <button @click="stopSelected()"
+                class="text-red-400 hover:text-red-300 transition-colors">
+                Stop selected
+              </button>
+              <button @click="selected = []"
+                class="text-gray-400 hover:text-gray-300 transition-colors">
+                Clear
+              </button>
+            </div>
+          </template>
 
           <template x-if="containers.length === 0">
             <div class="px-6 py-10 text-center text-gray-500 text-sm">
@@ -73,6 +99,14 @@
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-xs font-medium text-gray-400 uppercase tracking-wider border-b border-gray-700">
+                    <!-- Select-all checkbox -->
+                    <th class="pl-4 pr-2 py-3 w-8">
+                      <input type="checkbox"
+                        :checked="allSelected"
+                        :indeterminate.prop="someSelected && !allSelected"
+                        @change="toggleSelectAll()"
+                        class="rounded border-gray-600 bg-gray-700 cursor-pointer">
+                    </th>
                     <th class="px-6 py-3">Container</th>
                     <th class="px-6 py-3">Status</th>
                     <th class="px-6 py-3">Health</th>
@@ -83,9 +117,18 @@
                 </thead>
                 <tbody class="divide-y divide-gray-700">
                   <template x-for="c in containers" :key="c.name">
-                    <tr class="hover:bg-gray-750 transition-colors">
+                    <tr class="hover:bg-gray-750 transition-colors"
+                      :class="isSelected(c.name) ? 'bg-blue-950/20' : ''">
 
-                      <!-- Name + group badge (no service subtitle) -->
+                      <!-- Row checkbox -->
+                      <td class="pl-4 pr-2 py-3.5">
+                        <input type="checkbox"
+                          :checked="isSelected(c.name)"
+                          @change="toggleSelect(c.name)"
+                          class="rounded border-gray-600 bg-gray-700 cursor-pointer">
+                      </td>
+
+                      <!-- Name + group badge -->
                       <td class="px-6 py-3.5">
                         <div class="font-medium text-gray-200" x-text="c.name"></div>
                         <div class="mt-0.5" x-show="c.group">
@@ -115,7 +158,7 @@
                         </span>
                       </td>
 
-                      <!-- Health — hidden when container is not running (health is meaningless when stopped) -->
+                      <!-- Health — hidden when container is not running -->
                       <td class="px-6 py-3.5">
                         <template x-if="c.status === 'running' && c.health && c.health !== c.status">
                           <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-semibold"
@@ -181,6 +224,30 @@
             </div>
           </div>
 
+          <!-- Groups — only shown when at least one container belongs to a group -->
+          <template x-if="groups.length > 0">
+            <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+              <div class="px-5 py-3.5 border-b border-gray-700">
+                <h2 class="font-semibold text-sm">Groups</h2>
+              </div>
+              <div class="divide-y divide-gray-700/50">
+                <template x-for="group in groups" :key="group">
+                  <div class="px-5 py-3 flex items-center justify-between">
+                    <div>
+                      <span class="text-sm text-gray-200" x-text="group"></span>
+                      <span class="text-xs text-gray-500 ml-2"
+                        x-text="containers.filter(c => c.group === group).length + ' containers'"></span>
+                    </div>
+                    <button @click="stopGroup(group)"
+                      class="text-xs text-red-400 hover:text-red-300 transition-colors">
+                      Stop all
+                    </button>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
           <!-- Event log -->
           <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
             <div class="px-5 py-3.5 border-b border-gray-700 flex items-center justify-between">
@@ -198,7 +265,6 @@
                       'bg-blue-400':   ev.type === 'starting',
                       'bg-green-400':  ev.type === 'ready' || ev.type === 'manual_start',
                       'bg-red-400':    ev.type === 'auto_stop' || ev.type === 'manual_stop',
-                      'bg-gray-400':   ev.type === 'request',
                       'bg-yellow-400': ev.type === 'error'
                     }">
                   </span>
@@ -218,23 +284,57 @@
 
   <script>
     function app() {
+      // Store the EventSource and refresh timer outside Alpine's reactive scope.
+      //
+      // Alpine v3 wraps every property of the returned object in a JavaScript Proxy to
+      // track reactivity. If EventSource were stored as this._sse, Alpine would return a
+      // Proxy(EventSource) on access. Setting .onopen / .onmessage on that Proxy may not
+      // correctly delegate to the underlying object's event handler slots, so the callbacks
+      // never fire. A plain closure variable is invisible to Alpine and never proxied.
+      let _sse = null;
+      let _refreshTimer = null;
+
       return {
         containers: [],
         events:     [],
         connected:  false,
         loading:    true,
-        _sse:       null,
+        selected:   [],   // names of currently selected containers
 
         get runningCount() { return this.containers.filter(c => c.status === 'running').length; },
         get stoppedCount() { return this.containers.filter(c => c.status !== 'running').length; },
+        get allSelected()  { return this.containers.length > 0 && this.selected.length === this.containers.length; },
+        get someSelected() { return this.selected.length > 0; },
+
+        // Unique sorted list of group names across all managed containers.
+        get groups() {
+          return [...new Set(this.containers.map(c => c.group).filter(Boolean))].sort();
+        },
+
+        isSelected(name) {
+          return this.selected.includes(name);
+        },
+
+        toggleSelect(name) {
+          const idx = this.selected.indexOf(name);
+          if (idx >= 0) this.selected.splice(idx, 1);
+          else          this.selected.push(name);
+        },
+
+        toggleSelectAll() {
+          this.selected = this.allSelected ? [] : this.containers.map(c => c.name);
+        },
 
         // Alpine calls init() automatically — do NOT add x-init="init()" to the element.
         async init() {
           await Promise.all([this.fetchAll(), this.fetchHistory()]);
           this.connectSSE();
+          // Periodic fallback: re-sync the full container list every 30 s.
+          // This catches any state changes that arrived while SSE was reconnecting.
+          _refreshTimer = setInterval(() => this.fetchAll(), 30000);
         },
 
-        // Full container list — called once on load.
+        // Full container list — called once on load and after SSE reconnects.
         async fetchAll() {
           this.loading = true;
           try {
@@ -250,16 +350,16 @@
         },
 
         // Load recent event history so the log isn't empty on page open.
+        // 'request' events are excluded — they fire on every proxied hit and clutter the log.
         async fetchHistory() {
           try {
             const res = await fetch('/events/history');
             if (res.ok) {
               const history = await res.json();
-              // History is oldest-first from the server; we display newest-first.
-              this.events = history.reverse().map(e => ({
-                ...e,
-                timestamp: e.timestamp || new Date().toISOString(),
-              }));
+              this.events = history
+                .filter(e => e.type !== 'request')
+                .reverse()
+                .map(e => ({ ...e, timestamp: e.timestamp || new Date().toISOString() }));
             }
           } catch (e) {
             console.error('fetchHistory failed:', e);
@@ -267,7 +367,6 @@
         },
 
         // Targeted single-container fetch — triggered by state-changing SSE events.
-        // Much cheaper than re-fetching the full list.
         async fetchOne(name) {
           try {
             const res = await fetch(`/containers/${encodeURIComponent(name)}`);
@@ -285,39 +384,46 @@
         },
 
         connectSSE() {
-          if (this._sse) this._sse.close();
-          this._sse = new EventSource('/events');
+          if (_sse) _sse.close();
 
-          // Set connected as soon as the HTTP connection is established —
-          // don't wait for the first message to arrive.
-          this._sse.onopen = () => { this.connected = true; };
+          // Use the closure variable directly — NOT this._sse — so Alpine never proxies it.
+          _sse = new EventSource('/events');
 
-          this._sse.onmessage = (e) => {
+          // onopen fires as soon as the HTTP connection is established, before any data.
+          _sse.onopen = () => { this.connected = true; };
+
+          _sse.onmessage = (e) => {
             let data;
             try { data = JSON.parse(e.data); } catch { return; }
 
-            // 'ping' keepalives confirm the connection is alive; ignore them otherwise.
+            // Keepalive pings — just confirm the connection is alive.
             if (data.type === 'ping') {
               this.connected = true;
               return;
             }
 
-            // Prepend to event log, cap at 100 entries
-            this.events.unshift({ ...data, timestamp: new Date().toISOString() });
-            if (this.events.length > 100) this.events.length = 100;
+            // 'request' events fire on every proxied HTTP request.
+            // They don't change container state and clutter the log — skip them.
+            if (data.type !== 'request') {
+              this.events.unshift({ ...data, timestamp: data.timestamp || new Date().toISOString() });
+              if (this.events.length > 100) this.events.length = 100;
+            }
 
-            // Only hit the API for events that actually change container state.
-            // 'request' fires on every proxied request — no state change, skip it.
+            // Re-fetch the container for any event that changes its state.
             const stateEvents = ['starting', 'ready', 'auto_stop', 'manual_start', 'manual_stop', 'error'];
             if (data.container && stateEvents.includes(data.type)) {
               this.fetchOne(data.container);
             }
           };
 
-          this._sse.onerror = () => {
+          _sse.onerror = () => {
             this.connected = false;
-            this._sse.close();
-            setTimeout(() => this.connectSSE(), 5000);
+            _sse.close();
+            // Re-sync the full container list on reconnect so that any state changes
+            // that occurred while SSE was down are reflected immediately.
+            setTimeout(() => {
+              this.fetchAll().then(() => this.connectSSE());
+            }, 5000);
           };
         },
 
@@ -327,6 +433,18 @@
 
         async stopContainer(name) {
           await fetch(`/containers/${encodeURIComponent(name)}/stop`, { method: 'POST' });
+        },
+
+        // Stop all currently selected containers, then clear the selection.
+        async stopSelected() {
+          const toStop = [...this.selected];
+          this.selected = [];
+          await Promise.all(toStop.map(name => this.stopContainer(name)));
+        },
+
+        // Stop every running container that belongs to the given group.
+        async stopGroup(group) {
+          await fetch(`/groups/${encodeURIComponent(group)}/stop`, { method: 'POST' });
         },
 
         // Returns a human-readable relative time string.
