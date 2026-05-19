@@ -14,55 +14,33 @@ Wake-on-request for Docker containers. Keeps services stopped when idle, starts 
 
 - Traefik v3
 - Docker with socket access
-- The plugin must be loaded as a **local plugin** (it is not yet in the Traefik Plugin Catalog)
 
 ---
 
-## 1. Get the plugin files
+## 1. Configure Traefik
 
-Download the latest release and extract the plugin files:
-
-```bash
-mkdir -p ./plugin
-curl -sL https://github.com/ksmarty/traefik-autostart/releases/latest/download/plugin.tar.gz \
-  | tar -xz -C ./plugin
-```
-
-This gives you `./plugin/middleware.go`, `./plugin/.traefik.yml`, and `./plugin/go.mod`.
-
----
-
-## 2. Configure Traefik
-
-Mount the plugin directory into Traefik and register it as a local plugin.
-
-### Volume mount
-
-```
-./plugin:/plugins-local/src/github.com/ksmarty/traefik-autostart:ro
-```
-
-### Static config
-
-Pick one format:
+Enable the plugin via static config:
 
 **CLI flags**
 ```
---experimental.localPlugins.autostart.modulename=github.com/ksmarty/traefik-autostart
+--experimental.plugins.autostart.modulename=github.com/ksmarty/traefik-autostart
+--experimental.plugins.autostart.version=v0.5.8
 ```
 
 **YAML** (`traefik.yml`)
 ```yaml
 experimental:
-  localPlugins:
+  plugins:
     autostart:
-      moduleName: github.com/ksmarty/traefik-autostart
+      modulename: github.com/ksmarty/traefik-autostart
+      version: v0.5.8
 ```
 
 **TOML** (`traefik.toml`)
 ```toml
-[experimental.localPlugins.autostart]
-  moduleName = "github.com/ksmarty/traefik-autostart"
+[experimental.plugins.autostart]
+  modulename = "github.com/ksmarty/traefik-autostart"
+  version = "v0.5.8"
 ```
 
 ### Dynamic config (middleware definition)
@@ -79,7 +57,7 @@ http:
 
 ---
 
-## 3. Run the controller
+## 2. Run the controller
 
 The controller needs access to the Docker socket and the Traefik API.
 
@@ -116,7 +94,7 @@ controller:
 
 ---
 
-## 4. Label your containers
+## 3. Label your containers
 
 Add these labels to any container you want managed:
 
@@ -152,13 +130,13 @@ services:
       - --providers.docker.exposedbydefault=false
       - --providers.file.directory=/etc/traefik/dynamic
       - --entrypoints.web.address=:80
-      - --experimental.localPlugins.autostart.modulename=github.com/ksmarty/traefik-autostart
+      - --experimental.plugins.autostart.modulename=github.com/ksmarty/traefik-autostart
+      - --experimental.plugins.autostart.version=v0.5.8
     ports:
       - "80:80"
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./plugin:/plugins-local/src/github.com/ksmarty/traefik-autostart:ro
       - ./dynamic.yml:/etc/traefik/dynamic/dynamic.yml:ro
 
   controller:
@@ -218,8 +196,7 @@ The controller exposes a web dashboard at `http://controller:5000/` showing live
 ## Troubleshooting
 
 **Plugin not loading**
-- Confirm the `./plugin/` directory contains `middleware.go`, `.traefik.yml`, and `go.mod`
-- Confirm the volume mount path is exactly `/plugins-local/src/github.com/ksmarty/traefik-autostart`
+- Confirm you're using Traefik v3 with experimental plugins enabled
 - Check Traefik logs for plugin errors
 
 **Container not found for host**
