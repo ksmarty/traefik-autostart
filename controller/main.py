@@ -1,13 +1,14 @@
 import asyncio
 import json
 import os
+import shlex
+import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from contextlib import asynccontextmanager
 
-import docker
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,8 +56,8 @@ async def broadcast(event: dict) -> None:
 def _fetch_container_data(name: str, override_status: str | None = None) -> dict | None:
     """Blocking. Inspect a single managed container and return the webui dict.
 
-    Uses one Docker API call (GET /containers/{id}/json) to obtain both status
-    and health in a single round-trip. Returns None if the container is not found.
+    Uses `docker inspect` to obtain status and health in a single round-trip.
+    Returns None if the container is not found.
 
     If override_status is given it takes priority. Otherwise, containers that are
     in `starting_containers` report "starting" regardless of Docker status — this
@@ -64,112 +65,90 @@ def _fetch_container_data(name: str, override_status: str | None = None) -> dict
     Traefik registration are confirmed, which would make the webui appear ahead
     of the loading page.
     """
-    try:
-        c = manager.docker.containers.get(name)
-        labels = c.labels
-        health_info = c.attrs.get("State", {}).get("Health", {})
-        health = health_info.get("Status", c.status) if health_info else c.status
-        last_req = last_request_time.get(name)
-        if override_status is not None:
-            effective_status = override_status
-        elif name in starting_containers:
-            effective_status = "starting"
-        else:
-            effective_status = c.status
-        return {
-            "name": c.name,
-            "short_id": c.short_id,
-            "status": effective_status,
-            "health": health,
-            "stop_delay": labels.get("autostart.stop-delay", "not set"),
-            "last_request": last_req.isoformat() if last_req else None,
-            "service": labels.get("com.docker.compose.service", c.name),
-            "project": labels.get("com.docker.compose.project", ""),
-            "group": labels.get("autostart.group", ""),
-        }
-    except Exception:
+    c = manager._inspect(name)
+    if not c:
         return None
+    state = c.get("State", {})
+    status = state.get("Status", "unknown")
+    health_info = state.get("Health", {})
+    health = health_info.get("Status", status) if health_info else status
+    labels = c.get("Config", {}).get("Labels", {}) or {}
+    last_req = last_request_time.get(name)
+    if override_status is not None:
+        effective_status = override_status
+    elif name in starting_containers:
+        effective_status = "starting"
+    else:
+        effective_status = status
+    return {
+        "name": c["Name"].lstrip("/"),
+        "short_id": c["Id"][:12],
+        "status": effective_status,
+        "health": health,
+        "stop_delay": labels.get("autostart.stop-delay", "not set"),
+        "last_request": last_req.isoformat() if last_req else None,
+        "service": labels.get("com.docker.compose.service", c["Name"].lstrip("/")),
+        "project": labels.get("com.docker.compose.project", ""),
+        "group": labels.get("autostart.group", ""),
+    }
 
 
 def _fetch_all_containers_data() -> list[dict]:
     """Blocking. List all managed containers and inspect each one for its full state.
 
-    Uses one docker list call to enumerate managed containers, then one reload()
-    per container to obtain Health status (not available from the list API).
-    Total cost: 1 + N Docker API calls where N is the number of managed containers.
+    Uses `docker ps -a` to enumerate containers, then `docker inspect` per container
+    to obtain Health status.
     """
-    try:
-        all_containers = manager.docker.containers.list(all=True)
-    except Exception as e:
-        print(f"_fetch_all_containers_data list failed: {e}")
-        return []
+    managed = manager.find_managed_containers()
     result = []
-    for c in all_containers:
-        if not (c.labels.get("autostart.enable") == "true" or c.labels.get("autostart.group")):
+    for c in managed:
+        full = manager._inspect(c["name"])
+        if not full:
             continue
-        try:
-            c.reload()  # fetch full State including Health
-        except Exception:
-            pass  # use whatever attrs the list call returned
-        labels = c.labels
-        health_info = c.attrs.get("State", {}).get("Health", {})
-        health = health_info.get("Status", c.status) if health_info else c.status
-        last_req = last_request_time.get(c.name)
-        # Use "starting" if the container is in our in-flight set — same logic as
-        # _fetch_container_data — so periodic sync events never show "running" while
-        # Traefik hasn't registered the backend yet.
-        status = "starting" if c.name in starting_containers else c.status
+        state = full.get("State", {})
+        status = state.get("Status", "unknown")
+        health_info = state.get("Health", {})
+        health = health_info.get("Status", status) if health_info else status
+        labels = full.get("Config", {}).get("Labels", {}) or {}
+        last_req = last_request_time.get(c["name"])
+        effective_status = "starting" if c["name"] in starting_containers else status
         result.append({
-            "name": c.name,
-            "short_id": c.short_id,
-            "status": status,
+            "name": c["name"],
+            "short_id": c["short_id"],
+            "status": effective_status,
             "health": health,
             "stop_delay": labels.get("autostart.stop-delay", "not set"),
             "last_request": last_req.isoformat() if last_req else None,
-            "service": labels.get("com.docker.compose.service", c.name),
+            "service": labels.get("com.docker.compose.service", c["name"]),
             "project": labels.get("com.docker.compose.project", ""),
             "group": labels.get("autostart.group", ""),
         })
     return result
 
-client: Optional[docker.DockerClient] = None
-
-
-def get_docker_client() -> docker.DockerClient:
-    global client
-    if client is None:
-        socket_path = os.environ.get("DOCKER_SOCKET", "").strip() or "/var/run/docker.sock"
-        print(f"Connecting to Docker socket: {socket_path}")
-        try:
-            client = docker.DockerClient(base_url=f"unix://{socket_path}")
-            client.ping()
-            print("Docker connection successful")
-        except Exception as e:
-            print(f"Docker connection failed: {e}")
-            raise
-    return client
-
 
 class ContainerManager:
     def __init__(self):
-        self.docker = get_docker_client()
         self.lock = threading.Lock()
+
+    def _run(self, args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(args, capture_output=True, text=True)
+
+    def _inspect(self, name: str) -> dict | None:
+        result = self._run(["docker", "inspect", name])
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        return data[0] if data else None
 
     def find_container_by_host(self, host: str) -> Optional[dict]:
         managed = self.find_managed_containers()
 
-        # Primary: check traefik router rule labels directly on managed containers.
         for c in managed:
             for key, value in c["labels"].items():
                 if key.startswith("traefik.http.routers.") and key.endswith(".rule"):
                     if f"Host(`{host}`)" in value:
                         return c
 
-        # Fallback: query Traefik API for containers using defaultRule or other discovery.
-        # Docker provider service names are "{slug}@docker"; the slug matches the compose
-        # service name (com.docker.compose.service) or an explicit traefik service label.
-        # The router name slug (e.g. "pdf" from "pdf@docker") is checked first since Traefik
-        # names Docker routers after the container even when a custom service name is used.
         try:
             resp = httpx.get(f"{TRAEFIK_API_URL}/api/rawdata", timeout=10)
             resp.raise_for_status()
@@ -199,35 +178,41 @@ class ContainerManager:
         return None
 
     def find_container_by_name(self, name: str) -> Optional[dict]:
-        try:
-            container = self.docker.containers.get(name)
-            return {
-                "id": container.id,
-                "name": container.name,
-                "status": container.status,
-                "labels": container.labels,
-                "short_id": container.short_id,
-            }
-        except docker.errors.NotFound:
+        c = self._inspect(name)
+        if not c:
             return None
+        return {
+            "id": c["Id"],
+            "name": c["Name"].lstrip("/"),
+            "status": c["State"]["Status"],
+            "labels": c["Config"]["Labels"],
+            "short_id": c["Id"][:12],
+        }
 
     def find_managed_containers(self) -> list[dict]:
         containers = []
         try:
-            all_containers = self.docker.containers.list(all=True)
-            for c in all_containers:
-                # A container is managed if it explicitly opts in OR if it belongs to a group.
-                # Having autostart.group on a container is sufficient — autostart.enable is optional.
-                if c.labels.get("autostart.enable") == "true" or c.labels.get("autostart.group"):
+            result = self._run(["docker", "ps", "-a", "--format", "{{.Names}}"])
+            if result.returncode != 0:
+                return []
+            names = result.stdout.strip().split("\n") if result.stdout.strip() else []
+            for name in names:
+                if not name:
+                    continue
+                c = self._inspect(name)
+                if not c:
+                    continue
+                labels = c["Config"]["Labels"] or {}
+                if labels.get("autostart.enable") == "true" or labels.get("autostart.group"):
                     containers.append({
-                        "id": c.id,
-                        "name": c.name,
-                        "status": c.status,
-                        "labels": c.labels,
-                        "short_id": c.short_id,
-                        "service_name": c.labels.get("com.docker.compose.service", c.name),
-                        "project": c.labels.get("com.docker.compose.project", ""),
-                        "group": c.labels.get("autostart.group", ""),
+                        "id": c["Id"],
+                        "name": c["Name"].lstrip("/"),
+                        "status": c["State"]["Status"],
+                        "labels": labels,
+                        "short_id": c["Id"][:12],
+                        "service_name": labels.get("com.docker.compose.service", c["Name"].lstrip("/")),
+                        "project": labels.get("com.docker.compose.project", ""),
+                        "group": labels.get("autostart.group", ""),
                     })
         except Exception as e:
             print(f"Error listing containers: {e}")
@@ -235,10 +220,12 @@ class ContainerManager:
 
     def start_container(self, container_name: str) -> bool:
         try:
-            container = self.docker.containers.get(container_name)
-            if container.status != "running":
-                container.start()
-                self._wait_for_health(container)
+            c = self._inspect(container_name)
+            if not c:
+                return False
+            if c["State"]["Status"] != "running":
+                self._run(["docker", "start", container_name])
+                self._wait_for_health(container_name)
             return True
         except Exception as e:
             print(f"Error starting container: {e}")
@@ -246,21 +233,26 @@ class ContainerManager:
 
     def stop_container(self, container_name: str) -> bool:
         try:
-            container = self.docker.containers.get(container_name)
-            if container.status == "running":
-                container.stop()
+            c = self._inspect(container_name)
+            if not c:
+                return False
+            if c["State"]["Status"] == "running":
+                self._run(["docker", "stop", container_name])
             return True
         except Exception as e:
             print(f"Error stopping container: {e}")
             return False
 
-    def _wait_for_health(self, container, timeout: int = 60):
+    def _wait_for_health(self, name: str, timeout: int = 60):
         start = time.time()
         while time.time() - start < timeout:
-            container.reload()
-            health = container.attrs.get("State", {}).get("Health", {})
+            c = self._inspect(name)
+            if not c:
+                return
+            state = c.get("State", {})
+            health = state.get("Health", {})
             if not health:
-                if container.status == "running":
+                if state.get("Status") == "running":
                     return
             else:
                 status = health.get("Status")
@@ -269,14 +261,14 @@ class ContainerManager:
             time.sleep(1)
 
     def get_container_status(self, container_name: str) -> str:
-        try:
-            container = self.docker.containers.get(container_name)
-            health = container.attrs.get("State", {}).get("Health", {})
-            if health:
-                return health.get("Status", "unknown")
-            return container.status
-        except:
+        c = self._inspect(container_name)
+        if not c:
             return "unknown"
+        state = c.get("State", {})
+        health = state.get("Health", {})
+        if health:
+            return health.get("Status", "unknown")
+        return state.get("Status", "unknown")
 
 
 manager = ContainerManager()
