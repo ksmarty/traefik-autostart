@@ -1,6 +1,6 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.12-alpine
 
-RUN apt-get update && apt-get install -y --no-install-recommends docker-cli && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache docker-cli
 
 WORKDIR /app
 
